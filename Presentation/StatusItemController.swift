@@ -32,7 +32,7 @@ final class StatusItemController: NSObject {
         shelf.onSettings = { [weak self] in self?.showSettings() }
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked)
-        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        statusItem.button?.sendAction(on: [.leftMouseDown, .rightMouseDown])
 
         // Только явный запуск PoC; обычный запуск не создаёт разделители.
         if ProcessInfo.processInfo.arguments.contains("--section-markers-poc") {

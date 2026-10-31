@@ -9,7 +9,9 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
     private var transitionID = UUID()
     private var localMonitor: Any?
     private var globalMonitor: Any?
-    private var sourceWindow: NSWindow?
+    private weak var anchorButton: NSStatusBarButton?
+    private var dismissArmed = false
+    private var dismissGeneration = 0
 
     override init() {
         super.init()
@@ -36,7 +38,8 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         state.requestOpen()
         let window = panel ?? makePanel()
         panel = window
-        sourceWindow = button.window
+        anchorButton = button
+        dismissArmed = false
         window.setFrame(placement.frame, display: false)
         let duration = ShelfAnimationPolicy.duration(settings: settings,
             reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
@@ -57,6 +60,13 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
             state.finishOpening()
         }
         installMonitors()
+        // Текущий mouseDown не должен считаться кликом снаружи.
+        dismissGeneration += 1
+        let generation = dismissGeneration
+        Task { @MainActor [weak self] in
+            guard let self, self.dismissGeneration == generation else { return }
+            self.dismissArmed = true
+        }
     }
 
     private func makePanel() -> NSPanel {
@@ -117,13 +127,28 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         removeMonitors()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
             guard let self else { return event }
-            if event.type == .keyDown, event.keyCode == 53 { self.close(); return nil }
-            if event.type != .keyDown, event.window !== self.panel, event.window !== self.sourceWindow { self.close() }
+            if event.type == .keyDown {
+                if event.keyCode == 53 { self.close(); return nil }
+                return event
+            }
+            if event.window === self.panel { return event }
+            if self.outsideClickShouldClose() { self.close() }
             return event
         }
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.close()
+            guard let self, self.outsideClickShouldClose() else { return }
+            self.close()
         }
+    }
+
+    private func outsideClickShouldClose() -> Bool {
+        ShelfDismiss.shouldClose(armed: dismissArmed, pointerOnStatusButton: pointerIsOnAnchorButton())
+    }
+
+    private func pointerIsOnAnchorButton() -> Bool {
+        guard let button = anchorButton, let window = button.window else { return false }
+        let rect = window.convertToScreen(button.convert(button.bounds, to: nil))
+        return rect.contains(NSEvent.mouseLocation)
     }
 
     private func removeMonitors() {
@@ -145,11 +170,15 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
             }
         }
         removeMonitors()
-        sourceWindow = nil
+        anchorButton = nil
+        dismissArmed = false
+        dismissGeneration += 1
         state.finishClosing()
     }
 
-    func windowDidResignKey(_ notification: Notification) { close() }
+    func windowDidResignKey(_ notification: Notification) {
+        if outsideClickShouldClose() { close() }
+    }
     @objc private func screenChanged() { close(); state.cancel() }
 
     func stop() {

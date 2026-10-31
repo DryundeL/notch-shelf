@@ -50,6 +50,12 @@ final class ShelfStateTests: XCTestCase {
         state.finishClosing()
         XCTAssertEqual(state.phase, .closed)
     }
+
+    func testStatusClickDoesNotDismissAndOpeningClickIsIgnored() {
+        XCTAssertFalse(ShelfDismiss.shouldClose(armed: false, pointerOnStatusButton: false))
+        XCTAssertFalse(ShelfDismiss.shouldClose(armed: true, pointerOnStatusButton: true))
+        XCTAssertTrue(ShelfDismiss.shouldClose(armed: true, pointerOnStatusButton: false))
+    }
 }
 
 final class GeometryTests: XCTestCase {

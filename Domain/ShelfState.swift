@@ -26,6 +26,14 @@ struct ShelfState: Equatable, Sendable {
     mutating func cancel() { phase = .closed }
 }
 
+/// Клик по значку и «клик снаружи» приходят одним mouseDown.
+/// Закрывать по значку должен только toggle, иначе панель закроется и сразу откроется снова.
+enum ShelfDismiss {
+    static func shouldClose(armed: Bool, pointerOnStatusButton: Bool) -> Bool {
+        armed && !pointerOnStatusButton
+    }
+}
+
 /// Единственная политика допуска анимации; системное ограничение имеет приоритет.
 enum ShelfAnimationPolicy {
     static func duration(settings: ShelfSettings, reduceMotion: Bool) -> Double {
