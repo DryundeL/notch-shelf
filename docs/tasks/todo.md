@@ -13,11 +13,11 @@ Definition of Done на каждую задачу, сверх критериев
 **Acceptance criteria:**
 - [ ] В Dock иконки нет, status item есть, Quit завершает процесс (`ps` его не показывает).
 - [ ] Первый запуск не показывает диалоги Accessibility, Screen Recording, Input Monitoring.
-- [ ] Зависимостей в проекте нет.
+- [x] Зависимостей в проекте нет.
 
 **Verification:**
-- [ ] Build: `xcodebuild -project NotchShelf.xcodeproj -scheme NotchShelf -configuration Debug build`
-- [ ] Tests: таргет собирается, тестов ещё нет — это нормально
+- [x] Build: `xcodebuild -project NotchShelf.xcodeproj -scheme NotchShelf -configuration Debug build`
+- [x] Tests: таргет собирается, тестов ещё нет — это нормально
 - [ ] Manual: запуск собранного `.app`, Quit, проверка диалогов разрешений
 
 **Dependencies:** None
@@ -31,16 +31,18 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Estimated scope:** Medium
 
+Проверка 2026-10-31: `build-for-testing` с `CODE_SIGNING_ALLOWED=NO` успешно собирает приложение и оба тестовых таргета, Swift 6, deployment target macOS 14.0. Это не подтверждает запуск на macOS 14. Ручная проверка не завершена: инструмент управления GUI вернул timeout. Критерии Dock, Quit и отсутствия диалогов остаются открытыми.
+
 ### Task 2: Разделители секций
 
 **Description:** Два собственных status item как границы секции. Записать, остаются ли между ними тестовые значки после перезапуска и можно ли сдвинуть их Command-drag там, где ОС это позволяет. Эксперимент не объявлять функцией продукта.
 
 **Acceptance criteria:**
 - [ ] В `docs/capability-matrix.md` есть строка: OS build, дисплей, результат `works` / `partial` / `no`.
-- [ ] Код эксперимента либо удалён, либо не прячет ничего на обычном запуске.
+- [x] Код эксперимента либо удалён, либо не прячет ничего на обычном запуске.
 
 **Verification:**
-- [ ] Build: схема `NotchShelf` собирается
+- [x] Build: схема `NotchShelf` собирается
 - [ ] Manual: перезапуск приложения и повторный взгляд на menu bar
 
 **Dependencies:** Task 1
@@ -51,13 +53,15 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Estimated scope:** Medium
 
-### Task 3: Обзор AX, без кода в приложении
+### Task 3: Обзор AX и диагностика в приложении
+
+По запросу пользователя 2026-10-31 разрешён диагностический AX-сканер внутри приложения: только явный запуск, чтение метаданных без активации. Это заменяет прежний запрет AX-вызовов; матрица реальной активации всё ещё требует проверки.
 
 **Description:** На 6–10 чужих menu bar приложениях вручную проверить, стабильны ли идентификация item и открытие настоящего меню. Заголовки окон и снимки экрана не сохранять. Private API не использовать.
 
 **Acceptance criteria:**
 - [ ] В `docs/capability-matrix.md` строки: приложение, identify, реальное меню, смена иконки/badge, failure mode.
-- [ ] В репозитории приложения нет AX-вызовов.
+- [ ] Сканирование запускается явно, Accessibility запрашивается только после согласия; нет обхода окон, меню и автоматической активации.
 
 **Verification:**
 - [ ] Manual: матрица заполнена, Accessibility после обзора можно отозвать
@@ -94,11 +98,11 @@ Definition of Done на каждую задачу, сверх критериев
 **Description:** По задачам 2–4 зафиксировать объём MVP. Если перенос или активация чужих items неустойчивы, задачи 17–20 отменяются. Остаётся своя шторка и reveal нативной секции, без имитации клика.
 
 **Acceptance criteria:**
-- [ ] В `docs/capability-matrix.md` есть решение `conceal in scope` или `cancelled`, с датой и OS build.
-- [ ] Человек подтвердил решение до старта фазы 4.
+- [x] В `docs/capability-matrix.md` есть решение `conceal in scope` или `cancelled`, с датой и OS build.
+- [x] Человек подтвердил решение до старта фазы 4.
 
 **Verification:**
-- [ ] Manual: решение записано, отменённые задачи в этом файле помечены
+- [x] Manual: решение записано, отменённые задачи в этом файле помечены
 
 **Dependencies:** Tasks 2, 3, 4
 
@@ -111,9 +115,9 @@ Definition of Done на каждую задачу, сверх критериев
 ## Checkpoint: после задач 1–5
 
 - [ ] Agent собирается и завершается по Quit
-- [ ] `docs/PERF.md` и capability matrix существуют
-- [ ] Решение по conceal подтверждено человеком
-- [ ] Дальше не идём в задачи 17–20 без `conceal in scope`
+- [x] `docs/PERF.md` и capability matrix существуют
+- [x] Решение по conceal подтверждено человеком
+- [x] Дальше не идём в задачи 17–20 без `conceal in scope`
 
 ## Phase 1: Панель
 
@@ -122,12 +126,12 @@ Definition of Done на каждую задачу, сверх критериев
 **Description:** Чистая машина состояний `closed / opening / open / closing`. Повторный клик идемпотентен. Смена экрана отменяет переход. Без AppKit.
 
 **Acceptance criteria:**
-- [ ] Тест быстрого повторного клика не копит состояния.
-- [ ] Тест отмены на середине открытия возвращает `closed` без хвоста анимации.
+- [x] Тест быстрого повторного клика не копит состояния.
+- [x] Тест отмены на середине открытия возвращает `closed` без хвоста анимации.
 
 **Verification:**
-- [ ] Tests: `xcodebuild -project NotchShelf.xcodeproj -scheme NotchShelf -destination 'platform=macOS' test -only-testing:NotchShelfTests/ShelfStateTests`
-- [ ] Build: схема `NotchShelf`
+- [x] Tests: `xcodebuild -project NotchShelf.xcodeproj -scheme NotchShelf -destination 'platform=macOS' test -only-testing:NotchShelfTests/ShelfStateTests`
+- [x] Build: схема `NotchShelf`
 
 **Dependencies:** Task 1
 
@@ -137,16 +141,18 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Estimated scope:** Small
 
+Реализовано 2026-10-31: ShelfState и тесты повторных запросов, отмены и позднего завершения. Тесты находятся в существующем TestScaffold.swift.
+
 ### Task 7: Геометрия якоря
 
 **Description:** Расчёт anchor и clamp по фикстурам `DisplaySnapshot`: отрицательный origin, смешанный scale, узкий экран, notch против floating. Notch не выводится из имени монитора — во фикстуре это уже посчитанный флаг.
 
 **Acceptance criteria:**
-- [ ] Панель целиком внутри `visibleFrame`, включая экран с отрицательным origin.
-- [ ] Ширина не больше экрана минус поле; при нехватке высоты тесты фиксируют режим scroll, а не уменьшение hit target.
+- [x] Панель целиком внутри `visibleFrame`, включая экран с отрицательным origin.
+- [x] Ширина не больше экрана минус поле; при нехватке высоты тесты фиксируют режим scroll, а не уменьшение hit target.
 
 **Verification:**
-- [ ] Tests: `-only-testing:NotchShelfTests/GeometryTests`
+- [x] Tests: `-only-testing:NotchShelfTests/GeometryTests`
 
 **Dependencies:** Task 1
 
@@ -157,19 +163,21 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Estimated scope:** Medium
 
+Реализовано 2026-10-31: чистая геометрия принимает CGRect/CGSize в points, без NSScreen. Отдельный DisplaySnapshot отложен до задачи 14. Фикстуры покрывают отрицательный origin, узкий экран, notch/floating и неверный ввод. GUI-проверка нескольких дисплеев не выполнена.
+
 ### Task 8: Одна ленивая панель
 
 **Description:** Клик по status item открывает одну `NSPanel`, Escape и клик снаружи закрывают. Повторный клик не создаёт второе окно. Анимации в этой задаче нет: показать и скрыть сразу. Панель не создаётся при старте.
 
 **Acceptance criteria:**
-- [ ] После старта `NSPanel` нет, пока не было клика.
-- [ ] Второй клик в `open` закрывает, а не создаёт ещё одну панель.
-- [ ] Escape закрывает. Клик снаружи закрывает.
+- [x] После старта `NSPanel` нет, пока не было клика.
+- [x] Второй клик в `open` закрывает, а не создаёт ещё одну панель.
+- [x] Escape закрывает. Клик снаружи закрывает.
 
 **Verification:**
-- [ ] Build: Debug scheme `NotchShelf`
-- [ ] Tests: `ShelfStateTests` всё ещё зелёные
-- [ ] Manual: клик, повторный клик, Escape, клик снаружи
+- [x] Build: Debug scheme `NotchShelf`
+- [x] Tests: `ShelfStateTests` всё ещё зелёные
+- [x] Manual: клик, повторный клик, Escape, клик снаружи
 
 **Dependencies:** Tasks 6, 7
 
@@ -179,6 +187,8 @@ Definition of Done на каждую задачу, сверх критериев
 - `Domain/ShelfState.swift`
 
 **Estimated scope:** Medium
+
+Реализовано 2026-10-31: один ленивый NSPanel; левый клик переключает, правый открывает служебное меню. Escape/внешний клик и снятие monitors реализованы. Ручная проверка подтверждена пользователем сообщением «всё работает»: открытие/закрытие, Escape и клик снаружи. Отдельная матрица дисплеев и Spaces этим не подтверждена.
 
 ### Task 9: Notch и floating на живом экране
 
@@ -215,12 +225,12 @@ Definition of Done на каждую задачу, сверх критериев
 **Description:** `UserDefaults` + `Codable`, `schemaVersion`. Хранить только то, что уже читает продукт: `launchAtLogin` (значение, регистрация в задаче 21), `animationsEnabled`, `animationDurationMs`, `dismissDelayMs`, `fallbackMode`, режим дисплея. Битые данные и неизвестные значения заменяются безопасными defaults. Автоскрытие выключено и в схеме его нет.
 
 **Acceptance criteria:**
-- [ ] Повреждённый payload не включает скрытие и не роняет запуск.
-- [ ] Неизвестные ключи не меняют defaults.
-- [ ] Диапазоны длительностей ограничены (ноль и абсурдно большие не проходят).
+- [x] Повреждённый payload не включает скрытие и не роняет запуск.
+- [x] Неизвестные ключи не меняют defaults.
+- [x] Диапазоны длительностей ограничены (ноль и абсурдно большие не проходят).
 
 **Verification:**
-- [ ] Tests: `-only-testing:NotchShelfTests/SettingsMigrationTests`
+- [x] Tests: `-only-testing:NotchShelfTests/SettingsMigrationTests`
 
 **Dependencies:** Task 1
 
@@ -231,18 +241,20 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Estimated scope:** Medium
 
+Реализовано: ShelfSettings v1, SettingsStore и UserDefaultsSettingsStore. Диапазоны: animationDurationMs 1…1000, dismissDelayMs 1…5000. Fallback — ownPanel согласно решению Task 5; режим automatic/floating. Будущая/неизвестная schema сохраняется без перезаписи, повреждённые данные ограниченного размера копируются в один backup-ключ. Store пока не подключён к UI: это Task 11.
+
 ### Task 11: Окно настроек по требованию
 
 **Description:** SwiftUI внутри `NSHostingView`, пункт меню Settings. Окно создаётся при открытии, не при старте. Секции: General (тумблер логина без регистрации до задачи 21) и Appearance (анимации).
 
 **Acceptance criteria:**
-- [ ] До выбора Settings hosting view не создан.
-- [ ] Тумблер анимации пишется в store и читается обратно.
-- [ ] Окно не запрашивает TCC.
+- [x] До выбора Settings hosting view не создан.
+- [x] Тумблер анимации пишется в store и читается обратно.
+- [x] Открытие окна не запрашивает TCC; запрос возможен только отдельным действием диагностики.
 
 **Verification:**
-- [ ] Build: Debug scheme
-- [ ] Tests: `SettingsMigrationTests`
+- [x] Build: Debug scheme
+- [x] Tests: `SettingsMigrationTests`
 - [ ] Manual: открыть Settings, переключить анимацию, перезапустить, значение на месте
 
 **Dependencies:** Task 10
@@ -254,6 +266,8 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Estimated scope:** Medium
 
+Реализовано: ленивый NSHostingView, SettingsModel с обработкой ошибок, оформление и диагностика. Автозапуск показан недоступным до Task 21. Положение automatic/floating применяется при следующем открытии панели. Значения анимации сохраняются; сама анимация — Task 12. Ручная проверка перезапуска остаётся открытой.
+
 ### Task 12: Анимация и Reduce Motion
 
 **Description:** Панель анимируется только если анимация включена и системный Reduce Motion выключен. Иначе переход мгновенный. Длительность из настроек. Display link не заводится.
@@ -264,7 +278,7 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Verification:**
 - [ ] Manual: четыре комбинации тумблера и Reduce Motion
-- [ ] Tests: `ShelfStateTests` (отмена перехода не зависит от анимации)
+- [x] Tests: `ShelfStateTests` (отмена перехода не зависит от анимации)
 
 **Dependencies:** Tasks 8, 10
 
@@ -274,7 +288,11 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Estimated scope:** Small
 
+Реализовано: fade-in через NSAnimationContext; выключенный тумблер/Reduce Motion дают мгновенный показ. Закрытие мгновенное и перебивает fade; token перехода отбрасывает позднее completion. Нет таймеров или display link. Политика проверена во всех четырёх комбинациях unit-тестами; визуальная проверка остаётся открытой.
+
 ### Task 13: Reveal All до любого скрытия
+
+**Статус: не применяется к текущему MVP без conceal (решение Task 5).** Маркер не создаётся, Reveal All не имитируется. Очистка ресурсов при Quit реализована. Вернуться к требованиям перед любым будущим conceal.
 
 **Description:** Пункты меню Reveal All и безопасный режим. На диске маркер «нужно восстановить доступ». При старте с маркером приложение не выполняет conceal (conceal ещё и нет). Кнопка работает без private backend и без Accessibility.
 
@@ -311,8 +329,8 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Acceptance criteria:**
 - [ ] Серия одинаковых notification даёт один пересчёт.
-- [ ] Клик выбирает экран status item, когда он известен.
-- [ ] В idle нет таймера геометрии.
+- [x] Клик выбирает экран status item, когда он известен.
+- [x] В idle нет таймера геометрии.
 
 **Verification:**
 - [ ] Tests: coalesce и выбор цели на фейковом `DisplayProvider`
@@ -327,6 +345,8 @@ Definition of Done на каждую задачу, сверх критериев
 - `NotchShelfTests/DisplayPolicyTests.swift`
 
 **Estimated scope:** Medium
+
+Реализовано: DisplaySnapshot, DisplayProvider, ScreenDisplayProvider. Coalesce одним 50-ms заданием на серию событий; одинаковые snapshots не вызывают onChange. Выбор source → pointer → main покрыт тестами. Отдельный тест coalesce на fake и ручная проверка дисплеев остаются открытыми. Смена конфигурации закрывает панель.
 
 ### Task 15: Отключение монитора при открытой панели
 
@@ -349,17 +369,19 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Estimated scope:** Medium
 
+Реализовано закрытие панели при изменении снимков дисплеев, sleep/wake и смене Space с отменой перехода. Ручной hotplug и тест последовательности через fake-provider пока не выполнены, задача не закрыта.
+
 ### Task 16: Режим на дисплей
 
 **Description:** Best-effort ключ профиля дисплея и режим `notch` / `floating` / `minimal`. `minimal` не создаёт панель: остаётся status item и Reveal All. Конфликт двух дисплеев с одинаковым именем не затирает чужой профиль молча — fallback на `floating`.
 
 **Acceptance criteria:**
-- [ ] Внешний дисплей по умолчанию `floating`, не `notch`.
+- [x] Внешний дисплей по умолчанию `floating`, не `notch`.
 - [ ] `minimal` не оставляет скрытую панель.
-- [ ] Два экрана с одним именем не делят один профиль без разведения конфликта.
+- [x] Два экрана с одним именем не делят один профиль без разведения конфликта.
 
 **Verification:**
-- [ ] Tests: ключ профиля и fallback конфликта
+- [x] Tests: ключ профиля и fallback конфликта
 - [ ] Manual: смена режима в Settings для текущего экрана
 
 **Dependencies:** Tasks 10, 14
@@ -372,6 +394,8 @@ Definition of Done на каждую задачу, сверх критериев
 
 **Estimated scope:** Medium
 
+Реализованы perDisplayModes в v1 с совместимым чтением отсутствующего поля, UUID через публичный CGDisplayCreateUUIDFromDisplayID, проверка дубликатов ключей. Имена не являются ключом. Конфликт/нет ключа → floating, управление профилем недоступно. Минимальный режим открывает настройки вместо панели (Reveal All отсутствует после отмены conceal). Ручная проверка minimal и выбора режима остаётся открытой.
+
 ## Checkpoint: после задач 14–16
 
 - [ ] Панель не остаётся за выключенным монитором
@@ -383,6 +407,8 @@ Definition of Done на каждую задачу, сверх критериев
 Если задача 5 = `cancelled`, задачи 17–20 не делаются. Переход к фазе 5.
 
 ### Task 17: Backend секции
+
+**Статус: отменена в текущем MVP (Task 5, 2026-10-31, conceal: cancelled).** Критерии ниже сохранены как исходный план, не как обязательства текущего этапа.
 
 **Description:** Протокол из `09-domain-and-interfaces.md` и один адаптер на то, что разрешила задача 5. Результат операции: supported / unsupported / permissionDenied / transientFailure / conflict. Actor сериализует вызовы. Повторы ограничены, шторма нет. Неизвестный OS-путь не двигает items.
 
@@ -406,6 +432,8 @@ Definition of Done на каждую задачу, сверх критериев
 
 ### Task 18: Conceal только opt-in и откат
 
+**Статус: отменена в текущем MVP (Task 5, 2026-10-31, conceal: cancelled).** Критерии ниже сохранены как исходный план, не как обязательства текущего этапа.
+
 **Description:** Скрытие секции включается явным действием. Перед ним пишется маркер восстановления. Неудача или kill на следующем старте вызывает restore. Reveal All вызывает `restoreUserAccess` публичного пути и работает, даже если адаптер вернул unsupported.
 
 **Acceptance criteria:**
@@ -428,6 +456,8 @@ Definition of Done на каждую задачу, сверх критериев
 
 ### Task 19: Правила без автоскрытия
 
+**Статус: отменена в текущем MVP (Task 5, 2026-10-31, conceal: cancelled).** Критерии ниже сохранены как исходный план, не как обязательства текущего этапа.
+
 **Description:** Чистая функция: известные items, правила `pinVisible` / `preferHidden` / `ask`, capabilities. Неизвестный item даёт `ask` и ноль действий backend. `preferHidden` не исполняется, если capability conceal нет.
 
 **Acceptance criteria:**
@@ -448,6 +478,8 @@ Definition of Done на каждую задачу, сверх критериев
 **Estimated scope:** Medium
 
 ### Task 20: Запрос Accessibility по действию
+
+**Статус: отменена в текущем MVP (Task 5, 2026-10-31, conceal: cancelled).** Критерии ниже сохранены как исходный план, не как обязательства текущего этапа.
 
 **Description:** Только если задача 5 оставила функцию, которой нужен AX. Объяснение в UI, запрос в момент включения, не при старте. Отзыв права выключает функцию и не крутит retry.
 
@@ -567,3 +599,7 @@ Definition of Done на каждую задачу, сверх критериев
 - [ ] Conceal либо отменён явно, либо проходит recovery
 - [ ] `docs/PERF.md` объясняет, что оставили и что откатили
 - [ ] Задача 24 либо сделана, либо честно ждёт Apple Developer
+
+## Изменение UX по запросу пользователя
+
+Оба клика по NS переключают компактную панель; служебные команды перенесены в отдельное окно приложения, открываемое шестерёнкой внизу панели. Предыдущее решение о контекстном меню по правому клику заменено. Окно настроек пока содержит существующие команды диагностики и выхода, без новых сохраняемых параметров; задачи schema/UserDefaults остаются отдельными.

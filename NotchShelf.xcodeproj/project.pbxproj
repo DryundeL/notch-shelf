@@ -5,6 +5,10 @@
 	"objectVersion" = "56";
 	"archiveVersion" = "1";
 	"objects" = {
+"AABBCCDDEEFF001122334403" = { "isa" = "PBXFileReference"; "lastKnownFileType" = "image.icns"; "path" = "AppIcon.icns"; "sourceTree" = "<group>"; };
+"AABBCCDDEEFF001122334404" = { "isa" = "PBXBuildFile"; "fileRef" = "AABBCCDDEEFF001122334403"; };
+"AABBCCDDEEFF001122334401" = { "isa" = "PBXFileReference"; "lastKnownFileType" = "sourcecode.swift"; "path" = "MenuBarScanner.swift"; "sourceTree" = "<group>"; };
+"AABBCCDDEEFF001122334402" = { "isa" = "PBXBuildFile"; "fileRef" = "AABBCCDDEEFF001122334401"; };
 		"86251D8B28DEA085E7F8F519" = {
 			"isa" = "XCBuildConfiguration";
 			"buildSettings" = {
@@ -454,6 +458,7 @@
 			"isa" = "PBXResourcesBuildPhase";
 			"buildActionMask" = "2147483647";
 			"files" = (
+"AABBCCDDEEFF001122334404",
 			);
 			"runOnlyForDeploymentPostprocessing" = "0";
 		};
@@ -513,6 +518,7 @@
 			"isa" = "PBXGroup";
 			"children" = (
 				"D2179EBA704013887D500F4C",
+"AABBCCDDEEFF001122334401",
 				"1E98FF18A653EEF1516D48EE",
 			);
 			"sourceTree" = "<group>";
@@ -568,6 +574,7 @@
 			"isa" = "PBXGroup";
 			"children" = (
 				"CF6FB491A5A8512A7462ACF6",
+"AABBCCDDEEFF001122334403",
 			);
 			"sourceTree" = "<group>";
 		};
@@ -664,6 +671,7 @@
 			"buildActionMask" = "2147483647";
 			"files" = (
 				"ABCFA342C209449C6CCF6EDD",
+"AABBCCDDEEFF001122334402",
 				"5244BB32AF0D3347EDA5AF59",
 				"EB283E9A690E34E3FD7F01A5",
 				"EEC79E6DC2DB9779F6D87827",

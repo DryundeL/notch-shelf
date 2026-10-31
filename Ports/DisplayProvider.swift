@@ -1,3 +1,7 @@
-// Заготовка, задача 14: контракт текущих DisplaySnapshot и уведомлений об изменениях.
-// Уточнить изоляцию и владение подпиской; предусмотреть явное прекращение наблюдения.
-// Не раскрывать NSScreen наружу адаптера и не использовать polling.
+@MainActor
+protocol DisplayProvider: AnyObject {
+    var snapshots: [DisplaySnapshot] { get }
+    var onChange: (([DisplaySnapshot]) -> Void)? { get set }
+    func refresh()
+    func stop()
+}
