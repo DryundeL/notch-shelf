@@ -37,6 +37,7 @@ final class UserDefaultsSettingsStore: SettingsStore {
             }
         }
         let data = try JSONEncoder().encode(settings)
+        guard data.count <= maximumPayloadSize else { throw SettingsStoreError.invalidSettings }
         defaults.set(data, forKey: key)
     }
 }
@@ -71,3 +72,6 @@ final class UserDefaultsVisibilityRecoveryStore: VisibilityRecoveryStore {
     func markActive() { defaults.set(true, forKey: key) }
     func clear() { defaults.removeObject(forKey: key) }
 }
+
+// The native bridge and test doubles share the same visibility contract.
+extension NSHNativeVisibility: NativeVisibilityService {}

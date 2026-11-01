@@ -25,22 +25,45 @@ actor MenuBarScanner {
 
     func availableCandidates() -> [Candidate] { candidates }
 
+    /// AX uses a top-left origin; the presentation layer converts to AppKit coordinates.
+    func menuBarItemFrames() -> [UUID: CGRect] {
+        guard AXIsProcessTrusted() else { return [:] }
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(350))
+        var result: [UUID: CGRect] = [:]
+        for candidate in candidates {
+            guard !Task.isCancelled, ContinuousClock.now < deadline else { break }
+            guard let element = elements[candidate.id] else { continue }
+            var position: CFTypeRef?, size: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &position) == .success,
+                  AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &size) == .success,
+                  let position, let size, CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { continue }
+            let pointValue = unsafeDowncast(position, to: AXValue.self), sizeValue = unsafeDowncast(size, to: AXValue.self)
+            var point = CGPoint.zero, dimensions = CGSize.zero
+            guard AXValueGetType(pointValue) == .cgPoint, AXValueGetType(sizeValue) == .cgSize,
+                  AXValueGetValue(pointValue, .cgPoint, &point), AXValueGetValue(sizeValue, .cgSize, &dimensions),
+                  [point.x, point.y, dimensions.width, dimensions.height].allSatisfy(\.isFinite),
+                  dimensions.width > 0, dimensions.width <= 1024, dimensions.height > 0, dimensions.height <= 128 else { continue }
+            result[candidate.id] = CGRect(origin: point, size: dimensions)
+        }
+        return result
+    }
+
     func press(_ id: UUID) -> String {
-        guard !Task.isCancelled else { return "Проверка отменена." }
-        guard let element = elements[id] else { return "Элемент устарел. Повторите сканирование." }
-        guard AXIsProcessTrusted() else { return "Accessibility недоступен. Повторите сканирование после выдачи доступа." }
+        guard !Task.isCancelled else { return L("Проверка отменена.") }
+        guard let element = elements[id] else { return L("Элемент устарел. Повторите сканирование.") }
+        guard AXIsProcessTrusted() else { return L("Accessibility недоступен. Повторите сканирование после выдачи доступа.") }
         var role: CFTypeRef?
         let roleError = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
         guard roleError == .success, role as? String == kAXMenuBarItemRole else {
-            return "Элемент недоступен: \(Self.status(roleError)). Повторите сканирование."
+            return L("Элемент недоступен: %@. Повторите сканирование.", String(describing: Self.status(roleError)))
         }
         var actions: CFArray?
         let error = AXUIElementCopyActionNames(element, &actions)
-        guard error == .success else { return "Проверка действий: \(Self.status(error))" }
-        guard (actions as? [String] ?? []).contains(kAXPressAction) else { return "AXPress больше недоступен." }
-        guard !Task.isCancelled else { return "Проверка отменена." }
+        guard error == .success else { return L("Проверка действий: %@", String(describing: Self.status(error))) }
+        guard (actions as? [String] ?? []).contains(kAXPressAction) else { return L("AXPress больше недоступен.") }
+        guard !Task.isCancelled else { return L("Проверка отменена.") }
         let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
-        return "AXPress: \(Self.status(result)). Открытие меню подтвердите визуально."
+        return L("AXPress: %@. Открытие меню подтвердите визуально.", String(describing: Self.status(result)))
     }
 
     func scan(_ processes: [Process]) async -> String {
@@ -49,12 +72,12 @@ actor MenuBarScanner {
         elements.removeAll()
         candidates.removeAll()
         menuActions.removeAll()
-        guard AXIsProcessTrusted() else { return "Нет разрешения Accessibility. Выдайте его приложению и повторите сканирование." }
+        guard AXIsProcessTrusted() else { return L("Нет разрешения Accessibility. Выдайте его приложению и повторите сканирование.") }
         // Глобально только для AX-вызовов нашего процесса; AppKit здесь не используется.
         let timeout = AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.2)
-        guard timeout == .success else { return "Не удалось задать AX timeout: \(timeout.rawValue)" }
+        guard timeout == .success else { return L("Не удалось задать AX timeout: %@", String(describing: timeout.rawValue)) }
         let overallDeadline = ContinuousClock.now.advanced(by: .seconds(64))
-        var lines = ["НАЙДЕННЫЕ ЭЛЕМЕНТЫ", "Наличие AXPress не подтверждает открытие меню."]
+        var lines = [L("НАЙДЕННЫЕ ЭЛЕМЕНТЫ"), L("Наличие AXPress не подтверждает открытие меню.")]
         var diagnostics: [String] = []
         var unavailable: [String: Int] = [:]
         for process in Self.scanOrder(processes) {
@@ -62,15 +85,15 @@ actor MenuBarScanner {
             let deadline = ContinuousClock.now.advanced(by: .milliseconds(800))
             let owner = "\(Self.safe(process.name)) [\(Self.safe(process.bundleID))] PID \(process.pid)"
             guard !Task.isCancelled, ContinuousClock.now < overallDeadline else {
-                lines.append("Проход ограничен по времени; не все процессы проверены.")
+                lines.append(L("Проход ограничен по времени; не все процессы проверены."))
                 break
             }
-            guard AXIsProcessTrusted() else { lines.append("Разрешение Accessibility отозвано."); break }
+            guard AXIsProcessTrusted() else { lines.append(L("Разрешение Accessibility отозвано.")); break }
             let app = AXUIElementCreateApplication(process.pid)
             var value: CFTypeRef?
             let error = AXUIElementCopyAttributeValue(app, kAXExtrasMenuBarAttribute as CFString, &value)
             guard error == .success, let value, CFGetTypeID(value) == AXUIElementGetTypeID() else {
-                let reason = error == .success ? "неожиданный тип AX-значения" : Self.status(error)
+                let reason = error == .success ? L("неожиданный тип AX-значения") : Self.status(error)
                 unavailable[reason, default: 0] += 1
                 continue
             }
@@ -82,10 +105,10 @@ actor MenuBarScanner {
                 continue
             }
             let items = children as [AnyObject]
-            guard !items.isEmpty else { diagnostics.append("\(owner): элементов нет"); continue }
-            lines.append("\n\(owner): \(items.count) элементов (лимит 32)")
+            guard !items.isEmpty else { diagnostics.append(L("%@: элементов нет", String(describing: owner))); continue }
+            lines.append(L("\n%@: %@ элементов (лимит 32)", String(describing: owner), String(describing: items.count)))
             for (index, item) in items.enumerated() {
-                guard !Task.isCancelled, ContinuousClock.now < deadline else { lines.append("Лимит времени внутри приложения."); break }
+                guard !Task.isCancelled, ContinuousClock.now < deadline else { lines.append(L("Лимит времени внутри приложения.")); break }
                 guard CFGetTypeID(item) == AXUIElementGetTypeID() else { continue }
                 let element = unsafeDowncast(item, to: AXUIElement.self)
                 var role: CFTypeRef?
@@ -110,11 +133,11 @@ actor MenuBarScanner {
                 // Чужие строки ограничены и очищены для текстового отчёта.
                 let roleText = Self.safe(role as? String ?? "—")
                 let actionText = (actions as? [String] ?? []).prefix(16).map(Self.safe).joined(separator: ", ")
-                lines.append("  #\(index): роль=\(roleText) (\(Self.status(roleError))); идентификатор=\(identifier is String ? "есть" : "нет") (\(Self.status(idError))); действия=[\(actionText)] (\(Self.status(actionsError)))")
+                lines.append(L("  #%@: роль=%@ (%@); идентификатор=%@ (%@); действия=[%@] (%@)", String(describing: index), String(describing: roleText), String(describing: Self.status(roleError)), String(describing: identifier is String ? L("есть") : L("нет")), String(describing: Self.status(idError)), String(describing: actionText), String(describing: Self.status(actionsError))))
             }
         }
-        lines.append("\nСВОДКА НЕДОСТУПНЫХ ПРОЦЕССОВ")
-        lines.append("Отсутствие значения не доказывает отсутствие значка.")
+        lines.append(L("\nСВОДКА НЕДОСТУПНЫХ ПРОЦЕССОВ"))
+        lines.append(L("Отсутствие значения не доказывает отсутствие значка."))
         for reason in unavailable.keys.sorted() {
             lines.append("\(reason): \(unavailable[reason, default: 0])")
         }
@@ -126,12 +149,12 @@ actor MenuBarScanner {
         let description: String
         switch error {
         case .success: description = "OK"
-        case .noValue: description = "значение отсутствует"
-        case .attributeUnsupported: description = "атрибут не поддерживается"
-        case .cannotComplete: description = "запрос не завершён"
-        case .apiDisabled: description = "AX API недоступен"
-        case .invalidUIElement: description = "элемент недействителен"
-        default: description = "ошибка AX"
+        case .noValue: description = L("значение отсутствует")
+        case .attributeUnsupported: description = L("атрибут не поддерживается")
+        case .cannotComplete: description = L("запрос не завершён")
+        case .apiDisabled: description = L("AX API недоступен")
+        case .invalidUIElement: description = L("элемент недействителен")
+        default: description = L("ошибка AX")
         }
         return "\(description) [\(error.rawValue)]"
     }
@@ -203,7 +226,7 @@ extension MenuBarScanner {
 
     func performMenuAction(_ id: UUID) -> String {
         guard AXIsProcessTrusted(), !Task.isCancelled, let (element, expectedTitle) = menuActions[id] else {
-            return "Действие устарело или Accessibility недоступен. Откройте меню заново."
+            return L("Действие устарело или Accessibility недоступен. Откройте меню заново.")
         }
         var currentTitle: CFTypeRef?
         var enabled: CFTypeRef?
@@ -213,8 +236,8 @@ extension MenuBarScanner {
               AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &currentTitle) == .success,
               currentTitle as? String == expectedTitle,
               AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &enabled) == .success,
-              enabled as? Bool == true else { return "Пункт меню изменился или недоступен. Откройте меню заново." }
+              enabled as? Bool == true else { return L("Пункт меню изменился или недоступен. Откройте меню заново.") }
         menuActions.removeAll()
-        return "Действие меню: \(Self.status(AXUIElementPerformAction(element, kAXPressAction as CFString)))."
+        return L("Действие меню: %@.", String(describing: Self.status(AXUIElementPerformAction(element, kAXPressAction as CFString))))
     }
 }

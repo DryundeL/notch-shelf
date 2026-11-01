@@ -26,17 +26,6 @@ enum ShelfGeometry {
     }
 }
 
-/// Experimental macOS 27 workaround: keep each item below half a display.
-/// Use the narrowest attached screen because status items can appear on each bar.
-enum SectionWidthPolicy {
-    static func collapsedWidth(screenWidths: [CGFloat]) -> CGFloat? {
-        guard !screenWidths.isEmpty,
-              screenWidths.allSatisfy({ $0.isFinite && $0 > 152 }),
-              let narrowest = screenWidths.min() else { return nil }
-        return floor(narrowest / 2) - 64
-    }
-}
-
 /// Include the reachable strip below the camera, rather than a tiny edge target.
 enum HoverGeometry {
     static func trigger(screen: CGRect, safeTop: CGFloat, notchLeft: CGFloat?, notchRight: CGFloat?) -> CGRect? {
@@ -149,5 +138,21 @@ enum ConnectedShelfShape {
         path.addLine(to: CGPoint(x: leftNeck, y: size.height))
         path.closeSubpath()
         return path
+    }
+}
+
+/// Command-drag changes membership only after a real move across the manager's sides.
+enum MenuBarDragPolicy {
+    static func membership(source: CGPoint, before: CGRect, after: CGRect, anchor: CGRect) -> Bool? {
+        let values = [source.x, source.y, before.minX, before.minY, before.width, before.height,
+                      after.minX, after.minY, after.width, after.height,
+                      anchor.minX, anchor.minY, anchor.width, anchor.height]
+        guard values.allSatisfy(\.isFinite), before.width > 0, before.height > 0,
+              after.width > 0, after.height > 0, anchor.width > 0, anchor.height > 0,
+              before.contains(source), abs(before.midX - after.midX) > 2 || abs(before.midY - after.midY) > 2,
+              after.minY < anchor.maxY, after.maxY > anchor.minY else { return nil }
+        if after.midX < anchor.minX { return true }
+        if after.midX > anchor.maxX { return false }
+        return nil
     }
 }

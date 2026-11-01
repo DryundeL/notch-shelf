@@ -4,7 +4,10 @@ import QuartzCore
 @MainActor
 final class ShelfPanelController: NSObject, NSWindowDelegate {
     var onSettings: (() -> Void)?
-    private let displays = ScreenDisplayProvider()
+    private let displays: any DisplayProvider
+    private let applicationNotifications: NotificationCenter
+    private let workspaceNotifications: NotificationCenter
+    private(set) var isHoverSuspended = false
     private var panel: NSPanel?
     private var state = ShelfState()
     private var transitionID = UUID()
@@ -57,7 +60,7 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         hoverCloseTask?.cancel()
         hoverWindows.forEach { $0.orderOut(nil) }
         hoverWindows.removeAll()
-        guard !items.isEmpty, let settings = hoverSettings?() else { return }
+        guard !isHoverSuspended, !items.isEmpty, let settings = hoverSettings?() else { return }
         for screen in NSScreen.screens {
             guard let id = ScreenDisplayProvider.runtimeID(of: screen),
                   let snapshot = displays.snapshots.first(where: { $0.runtimeID == id }),
@@ -76,10 +79,10 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
             trigger.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
             let view = ShelfHoverView(frame: CGRect(origin: .zero, size: frame.size))
             view.virtualNotch = !hasNotch
-            view.toolTip = "Notch Shelf — наведите для открытия"
-            view.setAccessibilityLabel("Открыть Notch Shelf")
+            view.toolTip = L("Notch Shelf — наведите для открытия")
+            view.setAccessibilityLabel(L("Открыть Notch Shelf"))
             view.onEnter = { [weak self] in
-                guard let self, let settings = self.hoverSettings?(), !self.items.isEmpty else { return }
+                guard let self, !self.isHoverSuspended, let settings = self.hoverSettings?(), !self.items.isEmpty else { return }
                 self.hoverCloseTask?.cancel()
                 if self.panel?.isVisible == true && self.panel?.screen == screen && self.state.phase != .closing { return }
                 self.close(animated: false)
@@ -101,7 +104,10 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
             guard !Task.isCancelled, let self, self.openedByHover, !self.contextMenuActive else { return }
             let pointer = NSEvent.mouseLocation
             if self.state.phase == .opening, self.expandedHoverFrame?.contains(pointer) == true { return }
-            if self.panel?.frame.contains(pointer) == true { return }
+            if let window = self.panel, let background = window.contentView as? ShelfHoverEffectView {
+                let local = background.convert(window.convertPoint(fromScreen: pointer), from: nil)
+                if background.containsShelfPoint(local) { return }
+            }
             if self.hoverWindows.contains(where: { $0.frame.contains(pointer) }) { return }
             self.close()
         }
@@ -159,7 +165,7 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         guard items.indices.contains(sender.tag) else { return }
         hoverCloseTask?.cancel()
         contextMenuActive = true
-        showActionStatus("Открываем меню…")
+        showActionStatus(L("Открываем меню…"))
         NSApplication.shared.activate(ignoringOtherApps: true)
         activateItem?(items[sender.tag].id)
     }
@@ -171,7 +177,7 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
             activationTimeout?.cancel()
             activationTimeout = Task { @MainActor [weak self] in
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
-                self?.cancelContextMenuRequest("macOS не активировала окно для показа меню.")
+                self?.cancelContextMenuRequest(L("macOS не активировала окно для показа меню."))
             }
             NSApplication.shared.activate(ignoringOtherApps: true)
             return
@@ -184,7 +190,7 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         defer { contextAction = nil }
         let menu = makeContextMenu(entries)
         if menu.items.isEmpty {
-            let message = NSMenuItem(title: "Приложение не предоставляет меню для шторки", action: nil, keyEquivalent: "")
+            let message = NSMenuItem(title: L("Приложение не предоставляет меню для шторки"), action: nil, keyEquivalent: "")
             message.isEnabled = false
             menu.addItem(message)
         }
@@ -225,13 +231,21 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         contextAction?(id)
     }
 
-    override init() {
+    override convenience init() {
+        self.init(displays: ScreenDisplayProvider())
+    }
+
+    init(displays: any DisplayProvider, applicationNotifications: NotificationCenter = .default,
+         workspaceNotifications: NotificationCenter = NSWorkspace.shared.notificationCenter) {
+        self.displays = displays
+        self.applicationNotifications = applicationNotifications
+        self.workspaceNotifications = workspaceNotifications
         super.init()
-        NotificationCenter.default.addObserver(self, selector: #selector(applicationActivated), name: NSApplication.didBecomeActiveNotification, object: nil)
+        applicationNotifications.addObserver(self, selector: #selector(applicationActivated), name: NSApplication.didBecomeActiveNotification, object: nil)
         displays.onChange = { [weak self] _ in self?.screenChanged() }
-        for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification] {
-            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screenChanged), name: name, object: nil)
-        }
+        workspaceNotifications.addObserver(self, selector: #selector(screenChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        workspaceNotifications.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        workspaceNotifications.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
     }
 
     func toggle(from button: NSStatusBarButton, settings: ShelfSettings) {
@@ -245,6 +259,7 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
     }
 
     private func present(on screen: DisplaySnapshot, sourceX: CGFloat, anchor: NSStatusBarButton?, settings: ShelfSettings, hover: Bool) {
+        guard !isHoverSuspended else { return }
         resourceIcons.invalidate()
         let mode = DisplayProfilePolicy.mode(for: screen, among: displays.snapshots, settings: settings)
         if mode == .minimal { if !hover { onSettings?() }; return }
@@ -318,6 +333,7 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         window.hidesOnDeactivate = false
+        window.acceptsMouseMovedEvents = true
         window.delegate = self
         let background = ShelfHoverEffectView()
         background.onEnter = { [weak self] in self?.hoverCloseTask?.cancel() }
@@ -433,14 +449,28 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
     }
     @objc private func screenChanged() { close(animated: false); state.cancel(); rebuildHoverWindows() }
 
+    @objc private func willSleep() {
+        isHoverSuspended = true
+        screenChanged()
+    }
+
+    @objc private func didWake() {
+        guard isHoverSuspended else { return }
+        isHoverSuspended = false
+        let previous = displays.snapshots
+        displays.refresh()
+        // A changed snapshot already rebuilds through onChange.
+        if displays.snapshots == previous { screenChanged() }
+    }
+
     func stop() {
         close(animated: false)
         hoverWindows.forEach { $0.orderOut(nil) }
         hoverWindows.removeAll()
         hoverSettings = nil
         displays.stop()
-        NotificationCenter.default.removeObserver(self)
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        applicationNotifications.removeObserver(self)
+        workspaceNotifications.removeObserver(self)
         panel?.delegate = nil
         panel = nil
     }
@@ -470,15 +500,20 @@ private final class ShelfHoverView: NSView {
 }
 
 @MainActor
-private final class ShelfHoverEffectView: NSView {
+final class ShelfHoverEffectView: NSView {
     var neckWidth: CGFloat = 180 { didSet { updateShape() } }
     var neckHeight: CGFloat = 24 { didSet { updateShape() } }
     var bodyWidth: CGFloat = 180 { didSet { updateShape() } }
     var bodyHeight: CGFloat = 80 { didSet { updateShape() } }
+    private var pointerInside = false
+
+    func containsShelfPoint(_ point: NSPoint) -> Bool {
+        (layer?.mask as? CAShapeLayer)?.path?.contains(point) == true
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
-        if let path = (layer?.mask as? CAShapeLayer)?.path, !path.contains(local) { return nil }
+        guard containsShelfPoint(local) else { return nil }
         return super.hitTest(point)
     }
 
@@ -505,10 +540,20 @@ private final class ShelfHoverEffectView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self))
     }
-    override func mouseEntered(with event: NSEvent) { onEnter?() }
-    override func mouseExited(with event: NSEvent) { onExit?() }
+    private func updatePointer(with event: NSEvent) {
+        let inside = containsShelfPoint(convert(event.locationInWindow, from: nil))
+        guard inside != pointerInside else { return }
+        pointerInside = inside
+        if inside { onEnter?() } else { onExit?() }
+    }
+    override func mouseEntered(with event: NSEvent) { updatePointer(with: event) }
+    override func mouseMoved(with event: NSEvent) { updatePointer(with: event) }
+    override func mouseExited(with event: NSEvent) {
+        pointerInside = false
+        onExit?()
+    }
 }
 
 

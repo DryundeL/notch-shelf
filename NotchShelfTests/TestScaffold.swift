@@ -6,7 +6,7 @@ final class MenuBarReportTests: XCTestCase {
     func testUnknownSelectionCannotActivateAnItem() async {
         let scanner = MenuBarScanner()
         let result = await scanner.press(UUID())
-        XCTAssertEqual(result, "Элемент устарел. Повторите сканирование.")
+        XCTAssertEqual(result, L("Элемент устарел. Повторите сканирование."))
         let candidates = await scanner.availableCandidates()
         XCTAssertTrue(candidates.isEmpty)
     }
@@ -17,8 +17,8 @@ final class MenuBarReportTests: XCTestCase {
     }
 
     func testStatusesDistinguishMissingValueFromFailure() {
-        XCTAssertEqual(MenuBarScanner.status(.noValue), "значение отсутствует [-25212]")
-        XCTAssertEqual(MenuBarScanner.status(.cannotComplete), "запрос не завершён [-25204]")
+        XCTAssertEqual(MenuBarScanner.status(.noValue), L("значение отсутствует") + " [-25212]")
+        XCTAssertEqual(MenuBarScanner.status(.cannotComplete), L("запрос не завершён") + " [-25204]")
         XCTAssertEqual(MenuBarScanner.status(.success), "OK [0]")
     }
 }
@@ -306,20 +306,6 @@ final class LoginItemTests: XCTestCase {
     }
 }
 
-final class SectionWidthPolicyTests: XCTestCase {
-    func testWidthStaysBelowHalfOfEveryDisplay() throws {
-        let widths: [CGFloat] = [1512, 2560, 1920]
-        let width = try XCTUnwrap(SectionWidthPolicy.collapsedWidth(screenWidths: widths))
-        XCTAssertEqual(width, 692)
-        for screen in widths { XCTAssertLessThan(width, screen / 2) }
-    }
-
-    func testInvalidTopologyCannotProduceOversizedItem() {
-        for widths: [CGFloat] in [[], [0], [-100], [.infinity], [.nan], [100], [1920, 0]] {
-            XCTAssertNil(SectionWidthPolicy.collapsedWidth(screenWidths: widths))
-        }
-    }
-}
 
 final class NativeVisibilityPolicyTests: XCTestCase {
     func testOnlySelectedAppIsExcludedAndManagerIsRetained() {
@@ -332,6 +318,7 @@ final class NativeVisibilityPolicyTests: XCTestCase {
         }
     }
 }
+
 
 @MainActor
 final class MenuBarSelectionTests: XCTestCase {
@@ -484,7 +471,7 @@ final class LocalMenuSafetyTests: XCTestCase {
         let entries = await scanner.menuSnapshot(UUID())
         XCTAssertTrue(entries.isEmpty)
         let result = await scanner.performMenuAction(UUID())
-        XCTAssertTrue(result.contains("устарело"))
+        XCTAssertEqual(result, L("Действие устарело или Accessibility недоступен. Откройте меню заново."))
     }
 }
 
@@ -515,15 +502,15 @@ final class ShelfContextMenuTests: XCTestCase {
 final class StatusMenuTests: XCTestCase {
     func testStatusMenuListsApplicationsAndOffersSettingsAndQuitImmediately() {
         let menu = StatusItemController.makeStatusMenu(applicationNames: ["VPN", "Telegram", "VPN"], settingsTarget: nil)
-        XCTAssertEqual(menu.items.map(\.title), ["Приложения в шторке", "Telegram", "VPN", "", "Настройки…", "Выйти из Notch Shelf"])
+        XCTAssertEqual(menu.items.map(\.title), [L("Приложения в шторке"), "Telegram", "VPN", "", L("Настройки…"), L("Выйти из Notch Shelf")])
         XCTAssertFalse(menu.items[1].isEnabled)
         XCTAssertTrue(menu.items[4].isEnabled)
         XCTAssertEqual(menu.items[5].action, #selector(NSApplication.terminate(_:)))
     }
     func testEmptyShelfStillHasSettingsAndQuit() {
         let menu = StatusItemController.makeStatusMenu(applicationNames: [], settingsTarget: nil)
-        XCTAssertEqual(menu.items.first?.title, "В шторке пока нет приложений")
-        XCTAssertEqual(menu.items.suffix(2).map(\.title), ["Настройки…", "Выйти из Notch Shelf"])
+        XCTAssertEqual(menu.items.first?.title, L("В шторке пока нет приложений"))
+        XCTAssertEqual(menu.items.suffix(2).map(\.title), [L("Настройки…"), L("Выйти из Notch Shelf")])
     }
 }
 
@@ -732,5 +719,346 @@ final class CompleteApplicationInventoryTests: XCTestCase {
         let ordered = MenuBarScanner.scanOrder(processes)
         XCTAssertEqual(ordered.count, 200)
         XCTAssertEqual(Set(ordered.map(\.pid)), Set(processes.map(\.pid)))
+    }
+}
+
+@MainActor
+final class ShelfContourHoverTests: XCTestCase {
+    func testMovingIntoTransparentSideLeavesBubbleBeforeLeavingWindowFrame() throws {
+        let view = ShelfHoverEffectView(frame: CGRect(x: 0, y: 0, width: 212, height: 108))
+        view.wantsLayer = true
+        view.neckWidth = 212
+        view.neckHeight = 32
+        view.bodyHeight = 64
+        view.bodyWidth = 76
+        var entered = 0
+        var exited = 0
+        view.onEnter = { entered += 1 }
+        view.onExit = { exited += 1 }
+        for point in [CGPoint(x: 106, y: 30), CGPoint(x: 15, y: 30), CGPoint(x: 10, y: 30), CGPoint(x: 106, y: 30)] {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: .mouseMoved, location: point,
+                modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                eventNumber: 0, clickCount: 0, pressure: 0))
+            view.mouseMoved(with: event)
+        }
+        XCTAssertEqual(entered, 2)
+        XCTAssertEqual(exited, 1)
+        XCTAssertFalse(view.containsShelfPoint(CGPoint(x: 15, y: 30)))
+        XCTAssertTrue(view.containsShelfPoint(CGPoint(x: 106, y: 30)))
+    }
+}
+
+@MainActor
+final class ShelfSleepWakeTests: XCTestCase {
+    private final class Displays: DisplayProvider {
+        var snapshots: [DisplaySnapshot] = []
+        var onChange: (([DisplaySnapshot]) -> Void)?
+        var refreshCount = 0
+        var stopped = false
+        func refresh() { refreshCount += 1 }
+        func stop() { stopped = true; onChange = nil }
+    }
+
+    func testSleepSuspendsHoverUntilWakeAndRefreshesDisplaysOnce() {
+        let displays = Displays()
+        let notifications = NotificationCenter()
+        let controller = ShelfPanelController(displays: displays, applicationNotifications: NotificationCenter(), workspaceNotifications: notifications)
+        notifications.post(name: NSWorkspace.willSleepNotification, object: nil)
+        XCTAssertTrue(controller.isHoverSuspended)
+        displays.onChange?([])
+        XCTAssertTrue(controller.isHoverSuspended)
+        notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
+        XCTAssertFalse(controller.isHoverSuspended)
+        XCTAssertEqual(displays.refreshCount, 1)
+        notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
+        XCTAssertEqual(displays.refreshCount, 1)
+        controller.stop()
+    }
+
+    func testStopRemovesSleepWakeObservers() {
+        let displays = Displays()
+        let notifications = NotificationCenter()
+        let controller = ShelfPanelController(displays: displays, applicationNotifications: NotificationCenter(), workspaceNotifications: notifications)
+        controller.stop()
+        notifications.post(name: NSWorkspace.willSleepNotification, object: nil)
+        notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
+        XCTAssertFalse(controller.isHoverSuspended)
+        XCTAssertEqual(displays.refreshCount, 0)
+        XCTAssertTrue(displays.stopped)
+    }
+}
+
+@MainActor
+final class AccessibilityRecoveryTests: XCTestCase {
+    private final class Store: SettingsStore {
+        var value = ShelfSettings.defaults
+        init() { value.hiddenBundleIDs = ["org.example.Tool"] }
+        func load() -> ShelfSettings { value }
+        func save(_ settings: ShelfSettings) throws { value = settings }
+    }
+    private final class Marker: VisibilityRecoveryStore {
+        var requiresRecovery = false
+        func markActive() { requiresRecovery = true }
+        func clear() { requiresRecovery = false }
+    }
+
+    func testPermissionLossRestoresVisibilityWithoutErasingUserPreferences() {
+        var trusted = true
+        let store = Store()
+        let marker = Marker()
+        let model = SettingsModel(store: store, recovery: marker, iconAvailability: { _ in true }, accessibilityTrusted: { trusted })
+        model.setMenuBarItems([.init(id: UUID(), pid: 1, bundleID: "org.example.Tool", label: "Tool")])
+        marker.markActive()
+        var restored = false
+        model.onHiddenItems = { restored = $0.isEmpty }
+        trusted = false
+        XCTAssertFalse(model.requireAccessibility())
+        XCTAssertTrue(restored)
+        XCTAssertFalse(marker.requiresRecovery)
+        XCTAssertEqual(model.inventoryState, .permissionRequired)
+        XCTAssertTrue(model.menuBarItems.isEmpty)
+        XCTAssertTrue(model.hiddenCandidates.isEmpty)
+        XCTAssertFalse(model.visibilityBusy)
+        XCTAssertTrue(model.visibilityNeedsExplicitRetry)
+        XCTAssertEqual(model.settings.hiddenBundleIDs, ["org.example.Tool"])
+        XCTAssertEqual(model.pendingHiddenBundleIDs, ["org.example.Tool"])
+        trusted = true
+        XCTAssertTrue(model.requireAccessibility())
+        XCTAssertTrue(model.visibilityNeedsExplicitRetry)
+        let message = model.visibilityMessage
+        model.applyHiddenApplications(saveSelection: false)
+        XCTAssertEqual(model.visibilityMessage, message)
+        model.stop()
+    }
+
+    func testApplyingWithoutPermissionInvalidatesPreviouslyScannedItems() {
+        let model = SettingsModel(store: Store(), iconAvailability: { _ in true }, accessibilityTrusted: { false })
+        model.setMenuBarItems([.init(id: UUID(), pid: 1, bundleID: "org.example.Tool", label: "Tool")])
+        model.applyHiddenApplications()
+        XCTAssertEqual(model.inventoryState, .permissionRequired)
+        XCTAssertTrue(model.menuBarItems.isEmpty)
+        XCTAssertTrue(model.visibilityNeedsExplicitRetry)
+        model.stop()
+    }
+
+    func testRecoveryMarkerSurvivesRecreatingStoreAndClearsExplicitly() throws {
+        let suite = "NotchShelf.RecoveryTest." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        UserDefaultsVisibilityRecoveryStore(defaults: defaults).markActive()
+        XCTAssertTrue(UserDefaultsVisibilityRecoveryStore(defaults: defaults).requiresRecovery)
+        UserDefaultsVisibilityRecoveryStore(defaults: defaults).clear()
+        XCTAssertFalse(UserDefaultsVisibilityRecoveryStore(defaults: defaults).requiresRecovery)
+    }
+}
+
+@MainActor
+final class LocalizationTests: XCTestCase {
+    private func table(_ language: String) throws -> [String: String] {
+        let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
+        let url = URL(fileURLWithPath: path).appendingPathComponent("Localizable.strings")
+        return try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String: String])
+    }
+    func testBothLanguagesHaveCompleteMatchingKeysAndFormatArguments() throws {
+        let ru = try table("ru"), en = try table("en")
+        XCTAssertGreaterThan(ru.count, 120)
+        XCTAssertEqual(Set(ru.keys), Set(en.keys))
+        let format = try NSRegularExpression(pattern: "%(@|ld)")
+        for key in ru.keys {
+            let russian = try XCTUnwrap(ru[key]), english = try XCTUnwrap(en[key])
+            XCTAssertFalse(english.isEmpty, key)
+            func tokens(_ value: String) -> [String] {
+                let string = value as NSString
+                return format.matches(in: value, range: NSRange(location: 0, length: string.length)).map { string.substring(with: $0.range) }
+            }
+            XCTAssertEqual(tokens(russian), tokens(english), key)
+        }
+        XCTAssertEqual(en["Настройки…"], "Settings…")
+        XCTAssertEqual(ru["Настройки…"], "Настройки…")
+        XCTAssertEqual(en["Язык приложения"], "Application language")
+    }
+    func testFormattedTranslationKeepsUntrustedTextAsData() throws {
+        let en = try table("en")
+        let format = try XCTUnwrap(en["%@ — не найдено"])
+        XCTAssertEqual(String(format: format, "app%@"), "app%@ — not found")
+    }
+}
+
+@MainActor
+final class MenuBarSectionModeTests: XCTestCase {
+    private final class Store: SettingsStore {
+        var value = ShelfSettings.defaults
+        init() { value.menuBarSectionEnabled = true; value.hiddenBundleIDs = ["org.example.Shelf"]; value.menuBarSectionBundleIDs = ["org.example.Row"] }
+        func load() -> ShelfSettings { value }
+        func save(_ settings: ShelfSettings) throws { value = settings }
+    }
+    private final class Service: NativeVisibilityService {
+        var allowed: [String] = []
+        var restoreCount = 0
+        var completion: (@Sendable (String?) -> Void)?
+        func hide(withAllowedBundleIDs bundleIDs: [String], completion: @escaping @Sendable (String?) -> Void) {
+            allowed = bundleIDs
+            self.completion = completion
+        }
+        func restore() { restoreCount += 1 }
+    }
+    func testCollapseAndExpandKeepShelfHiddenAndReturnOriginalRowIcons() async {
+        let service = Service(), store = Store()
+        let own = Bundle.main.bundleIdentifier!
+        let processes = [MenuBarScanner.Process(pid: 1, bundleID: "org.example.Shelf", name: "Shelf"),
+                         .init(pid: 2, bundleID: "org.example.Row", name: "Row"),
+                         .init(pid: 3, bundleID: "com.apple.controlcenter", name: "System"),
+                         .init(pid: 4, bundleID: own, name: "Notch Shelf")]
+        let model = SettingsModel(store: store, iconAvailability: { $0.bundleID == "org.example.Shelf" },
+            accessibilityTrusted: { true }, nativeVisibility: service, installedApplication: { true }, runningProcesses: { processes })
+        model.setMenuBarItems(processes.map { .init(id: UUID(), pid: $0.pid, bundleID: $0.bundleID, label: $0.name) })
+        let collapsed = expectation(description: "Both groups hidden")
+        model.onHiddenItems = { items in
+            if model.menuBarSectionCollapsed && items.map(\.bundleID) == ["org.example.Shelf"] { collapsed.fulfill() }
+        }
+        model.applyHiddenApplications(saveSelection: false, sectionCollapsed: true)
+        XCTAssertFalse(service.allowed.contains("org.example.Row"))
+        XCTAssertFalse(service.allowed.contains("org.example.Shelf"))
+        XCTAssertTrue(service.allowed.contains(own))
+        XCTAssertTrue(service.allowed.contains("com.apple.controlcenter"))
+        service.completion?(nil)
+        await fulfillment(of: [collapsed], timeout: 2)
+        XCTAssertTrue(model.menuBarSectionCollapsed)
+        XCTAssertFalse(model.iconAvailableBundleIDs.contains("org.example.Row"))
+        let rescanned = expectation(description: "Row collapse survives inventory refresh")
+        model.onHiddenItems = { items in
+            if model.menuBarSectionCollapsed && items.map(\.bundleID) == ["org.example.Shelf"] { rescanned.fulfill() }
+        }
+        model.setMenuBarItems(processes.map { .init(id: UUID(), pid: $0.pid, bundleID: $0.bundleID, label: $0.name) })
+        model.applyHiddenApplications(saveSelection: false)
+        XCTAssertFalse(service.allowed.contains("org.example.Row"))
+        service.completion?(nil)
+        await fulfillment(of: [rescanned], timeout: 2)
+        let expanded = expectation(description: "Only shelf remains hidden")
+        model.onHiddenItems = { items in
+            if !model.menuBarSectionCollapsed && items.map(\.bundleID) == ["org.example.Shelf"] { expanded.fulfill() }
+        }
+        model.applyHiddenApplications(saveSelection: false, sectionCollapsed: false)
+        XCTAssertTrue(service.allowed.contains("org.example.Row"))
+        XCTAssertFalse(service.allowed.contains("org.example.Shelf"))
+        service.completion?(nil)
+        await fulfillment(of: [expanded], timeout: 2)
+        XCTAssertEqual(store.value.hiddenBundleIDs, ["org.example.Shelf"])
+        model.revealAll()
+        XCTAssertFalse(model.menuBarSectionCollapsed)
+        XCTAssertTrue(model.hiddenCandidates.isEmpty)
+        XCTAssertTrue(store.value.hiddenBundleIDs.isEmpty)
+        model.onHiddenItems = nil
+        model.stop()
+    }
+    func testFailureRestoresBothGroupsAndPausesAutomaticRetry() async {
+        let service = Service(), store = Store()
+        let processes = [MenuBarScanner.Process(pid: 1, bundleID: "org.example.Shelf", name: "Shelf"), .init(pid: 2, bundleID: "org.example.Row", name: "Row")]
+        let model = SettingsModel(store: store, iconAvailability: { _ in true }, accessibilityTrusted: { true }, nativeVisibility: service,
+            installedApplication: { true }, runningProcesses: { processes })
+        model.setMenuBarItems(processes.map { .init(id: UUID(), pid: $0.pid, bundleID: $0.bundleID, label: $0.name) })
+        model.applyHiddenApplications(saveSelection: false, sectionCollapsed: true)
+        let finished = expectation(description: "Failure handled")
+        let observer = model.$visibilityNeedsExplicitRetry.dropFirst().sink { value in if value { finished.fulfill() } }
+        service.completion?("Test failure")
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertFalse(model.menuBarSectionCollapsed)
+        XCTAssertTrue(model.hiddenCandidates.isEmpty)
+        XCTAssertFalse(model.visibilityBusy)
+        XCTAssertGreaterThan(service.restoreCount, 0)
+        observer.cancel()
+        model.stop()
+    }
+    func testRowModeWorksWithoutShelfOrResourceImagesAndRejectsLateCompletion() async {
+        let service = Service(), store = Store()
+        store.value.hiddenBundleIDs = []
+        let processes = [MenuBarScanner.Process(pid: 2, bundleID: "org.example.Row", name: "Row")]
+        let model = SettingsModel(store: store, iconAvailability: { _ in false }, accessibilityTrusted: { true }, nativeVisibility: service,
+            installedApplication: { true }, runningProcesses: { processes })
+        model.setMenuBarItems(processes.map { .init(id: UUID(), pid: $0.pid, bundleID: $0.bundleID, label: $0.name) })
+        let collapsed = expectation(description: "Original row icons hidden without copied images")
+        model.onHiddenItems = { _ in if model.menuBarSectionCollapsed { collapsed.fulfill() } }
+        model.applyHiddenApplications(saveSelection: false, sectionCollapsed: true)
+        XCTAssertNotNil(service.completion)
+        XCTAssertFalse(service.allowed.contains("org.example.Row"))
+        service.completion?(nil)
+        await fulfillment(of: [collapsed], timeout: 2)
+        XCTAssertTrue(model.hiddenCandidates.isEmpty)
+        model.applyHiddenApplications(saveSelection: false, sectionCollapsed: true)
+        let late = service.completion
+        model.revealAll()
+        let mustNotRehide = expectation(description: "Cancelled completion cannot hide again")
+        mustNotRehide.isInverted = true
+        model.onHiddenItems = { _ in if model.menuBarSectionCollapsed { mustNotRehide.fulfill() } }
+        late?(nil)
+        await fulfillment(of: [mustNotRehide], timeout: 0.1)
+        XCTAssertFalse(model.menuBarSectionCollapsed)
+        model.onHiddenItems = nil
+        model.stop()
+    }
+
+    func testOldSettingsKeepRowModeOffAndNewSettingsRoundTrip() throws {
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(ShelfSettings.defaults)) as? [String: Any])
+        json.removeValue(forKey: "menuBarSectionEnabled")
+        let old = try JSONDecoder().decode(ShelfSettings.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertFalse(old.menuBarSectionEnabled)
+        var new = old
+        new.menuBarSectionEnabled = true
+        new.hiddenBundleIDs = ["org.example.Shelf"]
+        XCTAssertEqual(try JSONDecoder().decode(ShelfSettings.self, from: JSONEncoder().encode(new)), new)
+    }
+}
+
+final class CommandDragPolicyTests: XCTestCase {
+    private let anchor = CGRect(x: 500, y: 950, width: 32, height: 24)
+    func testMovingAcrossManagerAssignsAndRemovesMembership() {
+        let before = CGRect(x: 600, y: 950, width: 20, height: 24)
+        let after = CGRect(x: 400, y: 950, width: 20, height: 24)
+        XCTAssertEqual(MenuBarDragPolicy.membership(source: CGPoint(x: 610, y: 960), before: before, after: after, anchor: anchor), true)
+        XCTAssertEqual(MenuBarDragPolicy.membership(source: CGPoint(x: 410, y: 960), before: after, after: before, anchor: anchor), false)
+    }
+    func testClicksUnrelatedItemsAndOffBarDropsDoNotChangeMembership() {
+        let frame = CGRect(x: 400, y: 950, width: 20, height: 24)
+        XCTAssertNil(MenuBarDragPolicy.membership(source: CGPoint(x: 410, y: 960), before: frame, after: frame, anchor: anchor))
+        XCTAssertNil(MenuBarDragPolicy.membership(source: CGPoint(x: 100, y: 960), before: frame, after: frame.offsetBy(dx: 200, dy: 0), anchor: anchor))
+        XCTAssertNil(MenuBarDragPolicy.membership(source: CGPoint(x: 410, y: 960), before: frame, after: frame.offsetBy(dx: 0, dy: -100), anchor: anchor))
+        XCTAssertNil(MenuBarDragPolicy.membership(source: CGPoint(x: 410, y: 960), before: frame, after: CGRect(x: 510, y: 950, width: 10, height: 24), anchor: anchor))
+    }
+}
+
+@MainActor
+final class ExplicitRowMembershipTests: XCTestCase {
+    private final class Store: SettingsStore {
+        var value = ShelfSettings.defaults
+        init() { value.menuBarSectionEnabled = true }
+        func load() -> ShelfSettings { value }
+        func save(_ settings: ShelfSettings) throws { value = settings }
+    }
+    func testOnlyExplicitMembersJoinTheGroupAndRevealAllClearsThem() {
+        let model = SettingsModel(store: Store(), iconAvailability: { _ in true })
+        let items = [MenuBarScanner.Candidate(id: UUID(), pid: 1, bundleID: "org.example.One", label: "One"),
+                     .init(id: UUID(), pid: 2, bundleID: "org.example.Two", label: "Two")]
+        model.setMenuBarItems(items)
+        XCTAssertTrue(model.availableSectionBundleIDs.isEmpty)
+        XCTAssertTrue(model.setSectionMembership(bundleID: items[0].bundleID, hidden: true))
+        XCTAssertEqual(model.availableSectionBundleIDs, [items[0].bundleID])
+        XCTAssertFalse(model.setSectionMembership(bundleID: "com.apple.controlcenter", hidden: true))
+        XCTAssertTrue(model.setSectionMembership(bundleID: items[0].bundleID, hidden: false))
+        XCTAssertTrue(model.availableSectionBundleIDs.isEmpty)
+        XCTAssertTrue(model.setSectionMembership(bundleID: items[1].bundleID, hidden: true))
+        model.revealAll()
+        XCTAssertTrue(model.settings.menuBarSectionBundleIDs.isEmpty)
+        model.stop()
+    }
+    func testOldEnabledModeDoesNotImplicitlySelectAllApplications() throws {
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(ShelfSettings.defaults)) as? [String: Any])
+        json["menuBarSectionEnabled"] = true
+        json.removeValue(forKey: "menuBarSectionBundleIDs")
+        let settings = try JSONDecoder().decode(ShelfSettings.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertTrue(settings.menuBarSectionEnabled)
+        XCTAssertTrue(settings.menuBarSectionBundleIDs.isEmpty)
+        var invalid = settings
+        invalid.menuBarSectionBundleIDs = ["org.example.One", "org.example.One"]
+        XCTAssertFalse(invalid.isValid)
     }
 }

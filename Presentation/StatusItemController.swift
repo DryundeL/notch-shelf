@@ -20,9 +20,16 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private var latestReport = ""
     private let statusItem: NSStatusItem
     private var sectionMarkers: [NSStatusItem] = []
-    private var sectionBoundary: NSStatusItem?
-    private var sectionControl: NSStatusItem?
-    private var sectionCollapsed = false
+    private var dragLocalMonitor: Any?
+    private var dragGlobalMonitor: Any?
+    private var dragGeneration = UUID()
+    private struct DragCapture {
+        let item: MenuBarScanner.Candidate
+        let source: CGPoint
+        let frame: CGRect
+    }
+    private var dragTask: Task<DragCapture?, Never>?
+    private var dropTask: Task<Void, Never>?
     private var applicationObservation: NSKeyValueObservation?
     private var inventoryRefreshTask: Task<Void, Never>?
     private var knownProcessIDs: Set<pid_t> = []
@@ -32,14 +39,13 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     @objc private func checkAccessibility() {
-        guard settingsModel?.hiddenCandidates.isEmpty == false, !AXIsProcessTrusted() else { return }
-        settingsModel?.restoreVisibility()
-        settingsModel?.beginInventoryRefresh(permissionGranted: false)
+        guard let model = settingsModel, model.visibilityBusy || model.menuBarSectionCollapsed || !model.hiddenCandidates.isEmpty else { return }
+        model.requireAccessibility()
     }
 
     private func scheduleInventoryRefresh() {
         guard inventoryRefreshTask == nil,
-              settingsWindow?.isVisible == true || settingsModel?.settings.hiddenBundleIDs.isEmpty == false else { return }
+              settingsWindow?.isVisible == true || (settingsModel?.settings.hiddenBundleIDs.isEmpty == false || settingsModel?.settings.menuBarSectionEnabled == true) else { return }
         inventoryRefreshTask = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
             guard let self else { return }
@@ -60,18 +66,7 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
-        statusItem.button?.toolTip = "Приложения в шторке, настройки и выход"
-
-        if ProcessInfo.processInfo.arguments.contains("--collapsible-section-poc") {
-            let boundary = NSStatusBar.system.statusItem(withLength: 12)
-            boundary.autosaveName = "NotchShelf.CollapseBoundary"
-            boundary.button?.title = "│"
-            boundary.button?.setAccessibilityLabel("Граница сворачиваемой секции")
-            sectionBoundary = boundary
-            sectionControl = statusItem
-            statusItem.button?.toolTip = "Приложения в шторке, настройки и выход"
-            sectionMarkers.append(boundary)
-        }
+        statusItem.button?.toolTip = L("Приложения в шторке, настройки и выход")
 
         // Только явный запуск PoC; обычный запуск не создаёт разделители.
         if ProcessInfo.processInfo.arguments.contains("--section-markers-poc") {
@@ -79,7 +74,7 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
                 let marker = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
                 marker.autosaveName = "NotchShelf.SectionMarker.\(title)"
                 marker.button?.title = title
-                marker.button?.setAccessibilityLabel("Тестовый разделитель \(title)")
+                marker.button?.setAccessibilityLabel(L("Тестовый разделитель %@", String(describing: title)))
                 sectionMarkers.append(marker)
             }
         }
@@ -96,45 +91,141 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
             }
         }
         shelf.configureHover(settings: { [weak self] in self?.settingsStore.load() ?? .defaults })
-        if !model.settings.hiddenBundleIDs.isEmpty {
+        configureSectionControl()
+        if !model.settings.hiddenBundleIDs.isEmpty || model.settings.menuBarSectionEnabled {
             refreshMenuBarItems(showReport: false, requestPermission: false)
         }
     }
 
-    private func revealSection() {
-        sectionBoundary?.button?.title = "│"
-        sectionBoundary?.length = 12
-        sectionCollapsed = false
-        sectionControl?.button?.toolTip = "Приложения в шторке, настройки и выход"
+    private func configureSectionControl() {
+        removeDragMonitors()
+        if settingsModel?.settings.menuBarSectionEnabled == true {
+            statusItem.menu = nil
+            statusItem.button?.target = self
+            statusItem.button?.action = #selector(statusItemClicked)
+            statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            dragLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] event in
+                self?.handleCommandDrag(event)
+                return event
+            }
+            dragGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] event in
+                self?.handleCommandDrag(event)
+            }
+        } else {
+            statusItem.button?.action = nil
+            let menu = NSMenu()
+            menu.delegate = self
+            statusItem.menu = menu
+        }
+        updateSectionControl()
+    }
+
+    private func updateSectionControl() {
+        let hasItems = settingsModel?.settings.menuBarSectionEnabled == true && settingsModel?.availableSectionBundleIDs.isEmpty == false
+        let base = Self.menuBarIcon()
+        if hasItems {
+            let collapsed = settingsModel?.menuBarSectionCollapsed == true
+            let arrow = NSImage(systemSymbolName: collapsed ? "chevron.left" : "chevron.right", accessibilityDescription: nil)
+            let image = NSImage(size: NSSize(width: 32, height: 18), flipped: false) { _ in
+                base.draw(in: NSRect(x: 0, y: 0, width: 20, height: 18))
+                arrow?.draw(in: NSRect(x: 23, y: 3, width: 7, height: 12))
+                return true
+            }
+            image.isTemplate = true
+            statusItem.button?.image = image
+        } else { statusItem.button?.image = base }
+        statusItem.button?.setAccessibilityLabel("Notch Shelf")
+        statusItem.button?.toolTip = settingsModel?.settings.menuBarSectionEnabled == true
+            ? L("Command-перенос влево — скрыть, вправо — вернуть. ЛКМ — группа, ПКМ — меню.")
+            : L("Приложения в шторке, настройки и выход")
+    }
+
+    @objc private func statusItemClicked() {
+        guard NSApplication.shared.currentEvent?.modifierFlags.contains(.command) != true, dropTask == nil else { return }
+        if NSApplication.shared.currentEvent?.type == .rightMouseUp || NSApplication.shared.currentEvent?.modifierFlags.contains(.control) == true {
+            let menu = NSMenu()
+            menuNeedsUpdate(menu)
+            guard let button = statusItem.button else { return }
+            let cell = ShelfPanelController.makeDropDownCell(menu: menu)
+            cell.performClick(withFrame: button.bounds, in: button)
+        } else if settingsModel?.availableSectionBundleIDs.isEmpty == false { toggleSection() }
+    }
+
+    private func anchorFrame() -> CGRect? {
+        guard let button = statusItem.button, let window = button.window else { return nil }
+        let frame = window.convertToScreen(button.convert(button.bounds, to: nil))
+        guard frame.width > 0, frame.height > 0,
+              NSScreen.screens.contains(where: { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) }) else { return nil }
+        return frame
+    }
+
+    private func appKitFrame(_ frame: CGRect) -> CGRect? {
+        guard let primary = NSScreen.screens.first else { return nil }
+        return CGRect(x: frame.minX, y: primary.frame.maxY - frame.maxY, width: frame.width, height: frame.height)
+    }
+
+    private func handleCommandDrag(_ event: NSEvent) {
+        guard let model = settingsModel, model.settings.menuBarSectionEnabled else { return }
+        if event.type == .leftMouseDown {
+            dragTask?.cancel()
+            dropTask?.cancel()
+            dragTask = nil
+            dragGeneration = UUID()
+            guard event.modifierFlags.contains(.command), !model.visibilityBusy, scanTask == nil, pressTask == nil,
+                  let anchor = anchorFrame() else { return }
+            let source = NSEvent.mouseLocation
+            guard source.y >= anchor.minY - 4, source.y <= anchor.maxY + 4, AXIsProcessTrusted() else { return }
+            let generation = dragGeneration
+            let scanner = self.scanner
+            dragTask = Task { @MainActor [weak self] in
+                let frames = await scanner.menuBarItemFrames()
+                guard !Task.isCancelled, let self, self.dragGeneration == generation else { return nil }
+                for item in self.candidates {
+                    if let raw = frames[item.id], let frame = self.appKitFrame(raw), frame.contains(source) {
+                        return DragCapture(item: item, source: source, frame: frame)
+                    }
+                }
+                return nil
+            }
+        } else if event.type == .leftMouseUp, let captureTask = dragTask {
+            let generation = dragGeneration
+            dragTask = nil
+            let scanner = self.scanner
+            dropTask = Task { @MainActor [weak self] in
+                defer { if self?.dragGeneration == generation { self?.dropTask = nil } }
+                guard let capture = await captureTask.value, !Task.isCancelled else { return }
+                // MenuBar's remote layout settles after the mouse-up event.
+                do { try await Task.sleep(for: .milliseconds(120)) } catch { return }
+                let frames = await scanner.menuBarItemFrames()
+                guard !Task.isCancelled, let self, self.dragGeneration == generation,
+                      let anchor = self.anchorFrame(), let raw = frames[capture.item.id], let after = self.appKitFrame(raw),
+                      let hidden = MenuBarDragPolicy.membership(source: capture.source, before: capture.frame, after: after, anchor: anchor),
+                      model.setSectionMembership(bundleID: capture.item.bundleID, hidden: hidden) else { return }
+                self.updateSectionControl()
+                model.applyHiddenApplications(saveSelection: false, sectionCollapsed: true)
+            }
+        }
+    }
+
+    private func removeDragMonitors() {
+        dragGeneration = UUID()
+        dragTask?.cancel(); dragTask = nil
+        dropTask?.cancel(); dropTask = nil
+        if let monitor = dragLocalMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = dragGlobalMonitor { NSEvent.removeMonitor(monitor) }
+        dragLocalMonitor = nil
+        dragGlobalMonitor = nil
     }
 
     @objc private func toggleSection() {
-        guard let boundary = sectionBoundary, let control = sectionControl else { return }
-        if sectionCollapsed {
-            boundary.button?.title = "│"
-            boundary.length = 12
-            sectionCollapsed = false
-            control.button?.toolTip = "Приложения в шторке, настройки и выход"
+        guard let model = settingsModel, model.settings.menuBarSectionEnabled,
+              !model.visibilityBusy, scanTask == nil, pressTask == nil else { return }
+        guard model.inventoryState == .ready else {
+            showSettings()
             return
         }
-        guard let boundaryWindow = boundary.button?.window,
-              let controlWindow = control.button?.window,
-              let screen = controlWindow.screen,
-              boundaryWindow.screen == screen,
-              boundaryWindow.frame.maxX <= controlWindow.frame.minX else {
-            let alert = NSAlert()
-            alert.messageText = "Расположите разделитель слева от NS"
-            alert.informativeText = "Удерживая Command, переместите │ левее NS, а сворачиваемые значки — левее │. Затем нажмите NS."
-            alert.runModal()
-            return
-        }
-        guard let width = SectionWidthPolicy.collapsedWidth(screenWidths: NSScreen.screens.map { $0.frame.width }) else {
-            revealSection()
-            return
-        }
-        boundary.length = width
-        sectionCollapsed = true
-        control.button?.toolTip = "Приложения в шторке, настройки и выход"
+        model.applyHiddenApplications(saveSelection: false, sectionCollapsed: !model.menuBarSectionCollapsed)
+        if model.inventoryState == .permissionRequired { showSettings() }
     }
 
     private static func menuBarIcon() -> NSImage {
@@ -159,7 +250,7 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.autoenablesItems = false
         let names = Array(Set(applicationNames)).sorted()
-        let header = NSMenuItem(title: names.isEmpty ? "В шторке пока нет приложений" : "Приложения в шторке", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: names.isEmpty ? L("В шторке пока нет приложений") : L("Приложения в шторке"), action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
         for name in names {
@@ -168,10 +259,10 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        let settings = NSMenuItem(title: "Настройки…", action: #selector(showSettings), keyEquivalent: ",")
+        let settings = NSMenuItem(title: L("Настройки…"), action: #selector(showSettings), keyEquivalent: ",")
         settings.target = settingsTarget
         menu.addItem(settings)
-        let quit = NSMenuItem(title: "Выйти из Notch Shelf", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: L("Выйти из Notch Shelf"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApplication.shared
         menu.addItem(quit)
         return menu
@@ -193,18 +284,17 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         model.setMenuBarItems(candidates)
         model.onHiddenItems = { [weak self] candidates in
             guard let self else { return }
+            self.updateSectionControl()
             self.shelf.setItems(candidates) { [weak self] id in
                 guard let self else { return }
                 guard self.pressTask == nil,
                       let candidate = self.candidates.first(where: { $0.id == id }),
                       let app = NSRunningApplication(processIdentifier: candidate.pid),
                       !app.isTerminated, app.bundleIdentifier == candidate.bundleID else {
-                    self.shelf.cancelContextMenuRequest("Приложение недоступно или предыдущая операция ещё выполняется.")
+                    self.shelf.cancelContextMenuRequest(L("Приложение недоступно или предыдущая операция ещё выполняется."))
                     return
                 }
-                guard AXIsProcessTrusted() else {
-                    self.settingsModel?.restoreVisibility()
-                    self.settingsModel?.beginInventoryRefresh(permissionGranted: false)
+                guard self.settingsModel?.requireAccessibility() == true else {
                     self.showSettings()
                     return
                 }
@@ -227,13 +317,19 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
         model.onInventoryChanged = { [weak self] in self?.scheduleInventoryRefresh() }
         settingsModel = model
+        model.onSectionModeChanged = { [weak self, weak model] in
+            guard let self else { return }
+            model?.restoreVisibility()
+            self.configureSectionControl()
+            self.scheduleInventoryRefresh()
+        }
         return model
     }
 
     @objc func showSettings() {
         shelf.close()
         let application = NSApplication.shared
-        let dockWarning = "macOS не удалось показать значок приложения в Dock."
+        let dockWarning = L("macOS не удалось показать значок приложения в Dock.")
         if settingsModel?.errorMessage == dockWarning { settingsModel?.errorMessage = nil }
         if application.activationPolicy() != .regular {
             let changed = application.setActivationPolicy(.regular)
@@ -250,7 +346,7 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 480),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "Notch Shelf — Настройки"
+        window.title = L("Notch Shelf — Настройки")
         window.isReleasedWhenClosed = false
         window.delegate = self
         let model = ensureSettingsModel()
@@ -259,8 +355,7 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
             showReport: { [weak self] in self?.reopenReport() },
             quit: { NSApplication.shared.terminate(nil) },
             applySelection: { [weak self] in self?.applySelection() },
-            refreshInventory: { [weak self] in self?.refreshMenuBarItems(showReport: false, requestPermission: true) },
-            revealSection: sectionBoundary == nil ? nil : { [weak self] in self?.revealSection() }))
+            refreshInventory: { [weak self] in self?.refreshMenuBarItems(showReport: false, requestPermission: true) }))
         settingsWindow = window
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -284,16 +379,16 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     private func refreshMenuBarItems(showReport shouldShowReport: Bool, requestPermission: Bool) {
         guard scanTask == nil, pressTask == nil else { return }
-        settingsModel?.restoreVisibility()
+        settingsModel?.restoreVisibility(resetSection: false)
         let trusted = AXIsProcessTrusted()
         settingsModel?.beginInventoryRefresh(permissionGranted: trusted)
         guard trusted else {
             guard requestPermission else { return }
             let alert = NSAlert()
-            alert.messageText = "Доступ к значкам menu bar"
-            alert.informativeText = "Для чтения ролей и доступных действий нужен Accessibility. Содержимое меню и снимки не собираются. После выдачи доступа повторите сканирование."
-            alert.addButton(withTitle: "Запросить доступ")
-            alert.addButton(withTitle: "Отмена")
+            alert.messageText = L("Доступ к значкам menu bar")
+            alert.informativeText = L("Для чтения ролей и доступных действий нужен Accessibility. Содержимое меню и снимки не собираются. После выдачи доступа повторите сканирование.")
+            alert.addButton(withTitle: L("Запросить доступ"))
+            alert.addButton(withTitle: L("Отмена"))
             if alert.runModal() == .alertFirstButtonReturn {
                 let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
                 _ = AXIsProcessTrustedWithOptions(options)
@@ -302,7 +397,7 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
         let processes = NSWorkspace.shared.runningApplications
             .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }
-            .map { MenuBarScanner.Process(pid: $0.processIdentifier, bundleID: $0.bundleIdentifier ?? "pid:\($0.processIdentifier)", name: $0.localizedName ?? "Без названия") }
+            .map { MenuBarScanner.Process(pid: $0.processIdentifier, bundleID: $0.bundleIdentifier ?? "pid:\($0.processIdentifier)", name: $0.localizedName ?? L("Без названия")) }
         pressButton?.isEnabled = false
         let scanner = self.scanner
         scanTask = Task { [weak self] in
@@ -312,7 +407,8 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
             self.scanTask = nil
             self.candidates = candidates
             self.settingsModel?.setMenuBarItems(candidates)
-            if self.settingsModel?.settings.hiddenBundleIDs.isEmpty == false {
+            self.updateSectionControl()
+            if self.settingsModel?.settings.hiddenBundleIDs.isEmpty == false || self.settingsModel?.settings.menuBarSectionEnabled == true {
                 self.applySelection(saveSelection: false)
             }
             if shouldShowReport { self.showReport(report) }
@@ -326,11 +422,11 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         let candidate = candidates[picker.indexOfSelectedItem]
         guard let app = NSRunningApplication(processIdentifier: candidate.pid), !app.isTerminated,
               app.bundleIdentifier == candidate.bundleID else {
-            actionStatus?.stringValue = "Процесс завершён или сменился. Повторите сканирование."
+            actionStatus?.stringValue = L("Процесс завершён или сменился. Повторите сканирование.")
             return
         }
         pressButton?.isEnabled = false
-        actionStatus?.stringValue = "Проверка…"
+        actionStatus?.stringValue = L("Проверка…")
         // Убираем окно диагностики, чтобы оно не закрывало чужое меню фокусом.
         reportWindow?.orderOut(nil)
         let scanner = self.scanner
@@ -340,7 +436,7 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
             self.pressTask = nil
             self.pressButton?.isEnabled = true
             self.actionStatus?.stringValue = result
-            self.latestReport += "\nПРОВЕРКА \(candidate.label): \(result)"
+            self.latestReport += L("\nПРОВЕРКА %@: %@", String(describing: candidate.label), String(describing: result))
             // Не активируем окно обратно: это может закрыть открывшееся меню.
         }
     }
@@ -365,8 +461,8 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
             try latestReport.write(to: url, atomically: true, encoding: .utf8)
         } catch {
             let alert = NSAlert()
-            alert.messageText = "Не удалось сохранить отчёт"
-            alert.informativeText = "Проверьте доступ к выбранной папке и попробуйте снова."
+            alert.messageText = L("Не удалось сохранить отчёт")
+            alert.informativeText = L("Проверьте доступ к выбранной папке и попробуйте снова.")
             alert.runModal()
         }
     }
@@ -375,7 +471,7 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         latestReport = report
         let window = reportWindow ?? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 480), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        window.title = "Диагностика значков"
+        window.title = L("Диагностика значков")
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 480))
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
@@ -401,22 +497,22 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         picker.autoresizingMask = [.width]
         content.addSubview(picker)
         candidatePicker = picker
-        let press = NSButton(title: "Проверить открытие", target: self, action: #selector(pressSelectedItem))
+        let press = NSButton(title: L("Проверить открытие"), target: self, action: #selector(pressSelectedItem))
         press.frame = NSRect(x: 445, y: 78, width: 205, height: 28)
         press.autoresizingMask = [.minXMargin]
         press.isEnabled = !candidates.isEmpty
         pressButton = press
         content.addSubview(press)
-        let status = NSTextField(labelWithString: "AXPress может выполнить действие значка. Окно скроется; вернуть: Настройки → Показать отчёт.")
+        let status = NSTextField(labelWithString: L("AXPress может выполнить действие значка. Окно скроется; вернуть: Настройки → Показать отчёт."))
         status.frame = NSRect(x: 12, y: 42, width: 736, height: 32)
         status.autoresizingMask = [.width]
         actionStatus = status
         content.addSubview(status)
-        let copy = NSButton(title: "Скопировать отчёт", target: self, action: #selector(copyReport))
+        let copy = NSButton(title: L("Скопировать отчёт"), target: self, action: #selector(copyReport))
         copy.frame = NSRect(x: 12, y: 8, width: 190, height: 28)
         content.addSubview(scroll)
         content.addSubview(copy)
-        let save = NSButton(title: "Сохранить отчёт…", target: self, action: #selector(saveReport))
+        let save = NSButton(title: L("Сохранить отчёт…"), target: self, action: #selector(saveReport))
         save.frame = NSRect(x: 210, y: 8, width: 190, height: 28)
         content.addSubview(save)
         window.contentView = content
@@ -445,8 +541,7 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         reportWindow?.close()
         reportWindow = nil
         latestReport = ""
-        sectionBoundary?.button?.title = "│"
-        sectionBoundary?.length = 12
+        removeDragMonitors()
         for marker in sectionMarkers {
             NSStatusBar.system.removeStatusItem(marker)
         }

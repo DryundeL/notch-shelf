@@ -1,0 +1,24 @@
+{
+  "os": "27.0.1",
+  "os_build": "26A434",
+  "hardware": "Mac16,12 / Apple M4 / 16 GiB",
+  "configuration": "Release (-O), default hardened runtime, ad-hoc signature",
+  "test_configuration": "Release (-O), ENABLE_TESTABILITY=YES, ENABLE_HARDENED_RUNTIME=NO for XCTest only",
+  "warmup_seconds": 60,
+  "sampling_seconds": 300,
+  "sample_interval_seconds": 5,
+  "mode": "Closed shelf, no selected applications; process-only NSArgumentDomain settings overrides",
+  "cpu_source": "top -l 61 -s 5 -pid <PID> -stats pid,cpu,mem,idlew,threads; first snapshot excluded",
+  "memory_source": "footprint -p <PID> -f bytes --noCategories before and after sampling",
+  "source_commit": "80d3c0b04664b8004915c083ada2dbe9c667c8f6",
+  "working_tree": "uncommitted project implementation; benchmark did not change application sources",
+  "limitations": [
+    "No actual status items hidden",
+    "No 20-item or 100-cycle stress test",
+    "No measured wakeups/sec through Instruments",
+    "Single run on development machine; background system load uncontrolled"
+  ],
+  "executable_sha256": "abac172e88356f310e2f9507a507f89c247ae4e14ba134ad2ad0c867c2b32151",
+  "source_files_sha256": "4472a09a0d01452568929aa3fd10309e3111de42cfbd4cc73cd6b586f4f4e627",
+  "release_unit_tests_passed": 68
+}

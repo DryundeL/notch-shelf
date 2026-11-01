@@ -5,6 +5,13 @@
 	"objectVersion" = "56";
 	"archiveVersion" = "1";
 	"objects" = {
+"CC1122334455667788990001" = { "isa" = "PBXFileReference"; "lastKnownFileType" = "sourcecode.swift"; "path" = "Localization.swift"; "sourceTree" = "<group>"; };
+"CC1122334455667788990002" = { "isa" = "PBXBuildFile"; "fileRef" = "CC1122334455667788990001"; };
+"CC1122334455667788990003" = { "isa" = "PBXVariantGroup"; "name" = "Localizable.strings"; "sourceTree" = "<group>"; "children" = ("CC1122334455667788990004", "CC1122334455667788990005",); };
+"CC1122334455667788990004" = { "isa" = "PBXFileReference"; "lastKnownFileType" = "text.plist.strings"; "name" = "ru"; "path" = "ru.lproj/Localizable.strings"; "sourceTree" = "<group>"; };
+"CC1122334455667788990005" = { "isa" = "PBXFileReference"; "lastKnownFileType" = "text.plist.strings"; "name" = "en"; "path" = "en.lproj/Localizable.strings"; "sourceTree" = "<group>"; };
+"CC1122334455667788990006" = { "isa" = "PBXBuildFile"; "fileRef" = "CC1122334455667788990003"; };
+
 "AA0011223344556677889911" = { "isa" = "PBXFileReference"; "lastKnownFileType" = "sourcecode.swift"; "path" = "MenuBarResourceIconProvider.swift"; "sourceTree" = "<group>"; };
 "AA0011223344556677889912" = { "isa" = "PBXBuildFile"; "fileRef" = "AA0011223344556677889911"; };
 
@@ -467,6 +474,7 @@
 			"buildActionMask" = "2147483647";
 			"files" = (
 "AABBCCDDEEFF001122334404",
+"CC1122334455667788990006",
 			);
 			"runOnlyForDeploymentPostprocessing" = "0";
 		};
@@ -528,6 +536,7 @@
 				"D2179EBA704013887D500F4C",
 "AA0011223344556677889901",
 "AA0011223344556677889911",
+"CC1122334455667788990001",
 "AABBCCDDEEFF001122334401",
 				"1E98FF18A653EEF1516D48EE",
 			);
@@ -586,6 +595,7 @@
 			"children" = (
 				"CF6FB491A5A8512A7462ACF6",
 "AABBCCDDEEFF001122334403",
+"CC1122334455667788990003",
 			);
 			"sourceTree" = "<group>";
 		};
@@ -684,6 +694,7 @@
 				"ABCFA342C209449C6CCF6EDD",
 "AA0011223344556677889902",
 "AA0011223344556677889912",
+"CC1122334455667788990002",
 "AABBCCDDEEFF001122334402",
 				"5244BB32AF0D3347EDA5AF59",
 				"EB283E9A690E34E3FD7F01A5",

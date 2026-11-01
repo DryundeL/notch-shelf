@@ -1,0 +1,25 @@
+{
+  "samples": 60,
+  "cpu_median_percent": 0.0,
+  "cpu_p95_percent": 0.1,
+  "cpu_max_percent": 0.4,
+  "warmup_seconds": 60,
+  "sampling_seconds": 300,
+  "pid": 73958,
+  "idlew_top_values": [
+    "10",
+    "10+",
+    "5",
+    "7+",
+    "8",
+    "8+",
+    "9",
+    "9+"
+  ],
+  "scope": "Release, closed shelf, default settings overridden in argument domain, no selected applications",
+  "phys_footprint_baseline_bytes": 15090648,
+  "phys_footprint_baseline_peak_bytes": 15483864,
+  "phys_footprint_end_bytes": 15369176,
+  "phys_footprint_end_peak_bytes": 15680472,
+  "phys_footprint_change_bytes": 278528
+}

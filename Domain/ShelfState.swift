@@ -44,6 +44,9 @@ enum ShelfAnimationPolicy {
 
 /// Never exclude the manager or system applications from an experimental allow-list.
 enum NativeVisibilityPolicy {
+    static func sectionBundleIDs(discovered: Set<String>, shelf: Set<String>, own: String) -> Set<String> {
+        discovered.subtracting(shelf).filter { !$0.isEmpty && !$0.hasPrefix("com.apple.") && $0 != own }
+    }
     static func allowedBundleIDs(running: [String], selected: String, own: String) -> [String]? {
         guard !own.isEmpty, !selected.isEmpty, selected != own,
               !selected.hasPrefix("com.apple."), running.contains(selected),
