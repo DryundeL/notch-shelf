@@ -1,3 +1,4 @@
+import ServiceManagement
 import Foundation
 
 @MainActor
@@ -38,4 +39,35 @@ final class UserDefaultsSettingsStore: SettingsStore {
         let data = try JSONEncoder().encode(settings)
         defaults.set(data, forKey: key)
     }
+}
+
+
+@MainActor
+final class SystemLoginItemService: LoginItemService {
+    var status: LoginItemStatus {
+        switch SMAppService.mainApp.status {
+        case .enabled: .enabled
+        case .notRegistered: .notRegistered
+        case .requiresApproval: .requiresApproval
+        case .notFound: .notFound
+        @unknown default: .notFound
+        }
+    }
+
+    func setEnabled(_ enabled: Bool) throws {
+        if enabled { try SMAppService.mainApp.register() }
+        else { try SMAppService.mainApp.unregister() }
+    }
+
+    func openSettings() { SMAppService.openSystemSettingsLoginItems() }
+}
+
+@MainActor
+final class UserDefaultsVisibilityRecoveryStore: VisibilityRecoveryStore {
+    private let defaults: UserDefaults
+    private let key = "shelf.visibilitySessionActive"
+    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+    var requiresRecovery: Bool { defaults.bool(forKey: key) }
+    func markActive() { defaults.set(true, forKey: key) }
+    func clear() { defaults.removeObject(forKey: key) }
 }

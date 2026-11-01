@@ -5,6 +5,12 @@
 	"objectVersion" = "56";
 	"archiveVersion" = "1";
 	"objects" = {
+"AA0011223344556677889911" = { "isa" = "PBXFileReference"; "lastKnownFileType" = "sourcecode.swift"; "path" = "MenuBarResourceIconProvider.swift"; "sourceTree" = "<group>"; };
+"AA0011223344556677889912" = { "isa" = "PBXBuildFile"; "fileRef" = "AA0011223344556677889911"; };
+
+"AA0011223344556677889901" = { "isa" = "PBXFileReference"; "lastKnownFileType" = "sourcecode.c.objc"; "path" = "NativeVisibility.m"; "sourceTree" = "<group>"; };
+"AA0011223344556677889902" = { "isa" = "PBXBuildFile"; "fileRef" = "AA0011223344556677889901"; };
+
 "AABBCCDDEEFF001122334403" = { "isa" = "PBXFileReference"; "lastKnownFileType" = "image.icns"; "path" = "AppIcon.icns"; "sourceTree" = "<group>"; };
 "AABBCCDDEEFF001122334404" = { "isa" = "PBXBuildFile"; "fileRef" = "AABBCCDDEEFF001122334403"; };
 "AABBCCDDEEFF001122334401" = { "isa" = "PBXFileReference"; "lastKnownFileType" = "sourcecode.swift"; "path" = "MenuBarScanner.swift"; "sourceTree" = "<group>"; };
@@ -180,6 +186,7 @@
 					"@loader_path/../Frameworks",
 				);
 				"PRODUCT_BUNDLE_IDENTIFIER" = "local.notchshelf.app";
+"SWIFT_OBJC_BRIDGING_HEADER" = "Infrastructure/NativeVisibility.h";
 				"CODE_SIGN_STYLE" = "Automatic";
 				"INFOPLIST_FILE" = "Resources/Info.plist";
 				"CURRENT_PROJECT_VERSION" = "1";
@@ -278,6 +285,7 @@
 					"@loader_path/../Frameworks",
 				);
 				"PRODUCT_BUNDLE_IDENTIFIER" = "local.notchshelf.app";
+"SWIFT_OBJC_BRIDGING_HEADER" = "Infrastructure/NativeVisibility.h";
 				"CODE_SIGN_STYLE" = "Automatic";
 				"INFOPLIST_FILE" = "Resources/Info.plist";
 				"CURRENT_PROJECT_VERSION" = "1";
@@ -518,6 +526,8 @@
 			"isa" = "PBXGroup";
 			"children" = (
 				"D2179EBA704013887D500F4C",
+"AA0011223344556677889901",
+"AA0011223344556677889911",
 "AABBCCDDEEFF001122334401",
 				"1E98FF18A653EEF1516D48EE",
 			);
@@ -541,6 +551,7 @@
 					"@loader_path/../Frameworks",
 				);
 				"PRODUCT_BUNDLE_IDENTIFIER" = "local.notchshelf.app";
+"SWIFT_OBJC_BRIDGING_HEADER" = "Infrastructure/NativeVisibility.h";
 				"CODE_SIGN_STYLE" = "Automatic";
 				"INFOPLIST_FILE" = "Resources/Info.plist";
 				"CURRENT_PROJECT_VERSION" = "1";
@@ -671,6 +682,8 @@
 			"buildActionMask" = "2147483647";
 			"files" = (
 				"ABCFA342C209449C6CCF6EDD",
+"AA0011223344556677889902",
+"AA0011223344556677889912",
 "AABBCCDDEEFF001122334402",
 				"5244BB32AF0D3347EDA5AF59",
 				"EB283E9A690E34E3FD7F01A5",

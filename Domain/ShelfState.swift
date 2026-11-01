@@ -41,3 +41,22 @@ enum ShelfAnimationPolicy {
         return Double(settings.animationDurationMs) / 1000
     }
 }
+
+/// Never exclude the manager or system applications from an experimental allow-list.
+enum NativeVisibilityPolicy {
+    static func allowedBundleIDs(running: [String], selected: String, own: String) -> [String]? {
+        guard !own.isEmpty, !selected.isEmpty, selected != own,
+              !selected.hasPrefix("com.apple."), running.contains(selected),
+              running.count <= 512 else { return nil }
+        return Array(Set(running.filter { $0 != selected } + [own])).sorted()
+    }
+}
+
+
+extension NativeVisibilityPolicy {
+    static func allowedBundleIDs(running: [String], selected: Set<String>, own: String) -> [String]? {
+        guard !selected.isEmpty, selected.allSatisfy({ !$0.isEmpty && $0 != own && !$0.hasPrefix("com.apple.") }),
+              !own.isEmpty, running.count <= 512, selected.isSubset(of: Set(running)) else { return nil }
+        return Array(Set(running).subtracting(selected).union([own])).sorted()
+    }
+}

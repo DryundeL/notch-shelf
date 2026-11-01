@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 
 @MainActor
 final class ShelfPanelController: NSObject, NSWindowDelegate {
@@ -7,14 +8,226 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
     private var state = ShelfState()
     private var transitionID = UUID()
+    private var collapsedFrame: CGRect?
+    private var expandedHoverFrame: CGRect?
+    private var contentTopInset: CGFloat = 36
+    private var bodyWidth: CGFloat = 180
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private weak var anchorButton: NSStatusBarButton?
     private var dismissArmed = false
     private var dismissGeneration = 0
+    private var hoverWindows: [NSPanel] = []
+    private var hoverSettings: (() -> ShelfSettings)?
+    private var hoverCloseTask: Task<Void, Never>?
+    private var openedByHover = false
+    private var contextMenuActive = false
+    private var pendingContextMenu: (entries: [MenuBarScanner.MenuEntry], id: UUID, perform: (UUID) -> Void)?
+    private var activationTimeout: Task<Void, Never>?
+
+    func cancelContextMenuRequest(_ message: String) {
+        pendingContextMenu = nil
+        activationTimeout?.cancel()
+        contextMenuActive = false
+        showActionStatus(message)
+        scheduleHoverClose()
+    }
+
+    @objc private func applicationActivated() {
+        guard let pending = pendingContextMenu else { return }
+        pendingContextMenu = nil
+        activationTimeout?.cancel()
+        showContextMenu(pending.entries, for: pending.id, perform: pending.perform)
+    }
+    private var contextAction: ((UUID) -> Void)?
+    private weak var actionStatusLabel: NSTextField?
+
+    func showActionStatus(_ message: String) {
+        actionStatusLabel?.stringValue = message
+        actionStatusLabel?.toolTip = message
+    }
+    private let resourceIcons = MenuBarResourceIconProvider()
+
+    func configureHover(settings: @escaping () -> ShelfSettings) {
+        hoverSettings = settings
+        rebuildHoverWindows()
+    }
+
+    private func rebuildHoverWindows() {
+        hoverCloseTask?.cancel()
+        hoverWindows.forEach { $0.orderOut(nil) }
+        hoverWindows.removeAll()
+        guard !items.isEmpty, let settings = hoverSettings?() else { return }
+        for screen in NSScreen.screens {
+            guard let id = ScreenDisplayProvider.runtimeID(of: screen),
+                  let snapshot = displays.snapshots.first(where: { $0.runtimeID == id }),
+                  DisplayProfilePolicy.mode(for: snapshot, among: displays.snapshots, settings: settings) != .minimal else { continue }
+            let hasNotch = snapshot.hasNotch
+            let left = screen.auxiliaryTopLeftArea?.maxX
+            let right = screen.auxiliaryTopRightArea?.minX
+            guard let frame = HoverGeometry.trigger(screen: screen.frame, safeTop: hasNotch ? screen.safeAreaInsets.top : 0,
+                notchLeft: left, notchRight: right) else { continue }
+            let trigger = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            trigger.isOpaque = false
+            trigger.backgroundColor = .clear
+            trigger.hasShadow = false
+            trigger.hidesOnDeactivate = false
+            trigger.level = .statusBar
+            trigger.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+            let view = ShelfHoverView(frame: CGRect(origin: .zero, size: frame.size))
+            view.virtualNotch = !hasNotch
+            view.toolTip = "Notch Shelf — наведите для открытия"
+            view.setAccessibilityLabel("Открыть Notch Shelf")
+            view.onEnter = { [weak self] in
+                guard let self, let settings = self.hoverSettings?(), !self.items.isEmpty else { return }
+                self.hoverCloseTask?.cancel()
+                if self.panel?.isVisible == true && self.panel?.screen == screen && self.state.phase != .closing { return }
+                self.close(animated: false)
+                self.present(on: snapshot, sourceX: snapshot.frame.midX, anchor: nil, settings: settings, hover: true)
+            }
+            view.onExit = { [weak self] in self?.scheduleHoverClose() }
+            trigger.contentView = view
+            trigger.orderFrontRegardless()
+            hoverWindows.append(trigger)
+        }
+    }
+
+    private func scheduleHoverClose() {
+        guard openedByHover, !contextMenuActive else { return }
+        hoverCloseTask?.cancel()
+        hoverCloseTask = Task { @MainActor [weak self] in
+            // Let the adjacent tracking area receive mouseEntered before checking.
+            await Task.yield()
+            guard !Task.isCancelled, let self, self.openedByHover, !self.contextMenuActive else { return }
+            let pointer = NSEvent.mouseLocation
+            if self.state.phase == .opening, self.expandedHoverFrame?.contains(pointer) == true { return }
+            if self.panel?.frame.contains(pointer) == true { return }
+            if self.hoverWindows.contains(where: { $0.frame.contains(pointer) }) { return }
+            self.close()
+        }
+    }
+    private var items: [MenuBarScanner.Candidate] = []
+    private var activateItem: ((UUID) -> Void)?
+    private weak var itemsDocument: NSView?
+    private weak var itemsScroll: NSScrollView?
+
+    func setItems(_ candidates: [MenuBarScanner.Candidate], activate: @escaping (UUID) -> Void) {
+        contextMenuActive = false
+        resourceIcons.invalidate()
+        items = candidates
+        activateItem = activate
+        updateItemButtons()
+        rebuildHoverWindows()
+    }
+
+    private func updateItemButtons() {
+        itemsScroll?.isHidden = items.isEmpty
+        guard let document = itemsDocument else { return }
+        document.subviews.forEach { $0.removeFromSuperview() }
+        let width = max(44, itemsScroll?.contentSize.width ?? 388)
+        let frames = BubbleIconGrid.frames(itemCount: items.count, width: width)
+        let height = max(44, (frames.map(\.maxY).max() ?? 42) + 2)
+        document.setFrameSize(NSSize(width: width, height: height))
+        for (index, item) in items.enumerated() {
+            let button = ShelfItemButton(title: "", target: self, action: #selector(activateShelfItem(_:)))
+            guard frames.indices.contains(index) else { continue }
+            button.frame = frames[index]
+            button.tag = index
+            button.title = String((NSRunningApplication(processIdentifier: item.pid)?.localizedName ?? item.bundleID).prefix(4))
+            button.font = .systemFont(ofSize: 10, weight: .medium)
+            button.attributedTitle = NSAttributedString(string: button.title, attributes: [
+                .foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 10, weight: .medium)])
+            button.contentTintColor = .white
+            if let url = NSRunningApplication(processIdentifier: item.pid)?.bundleURL,
+               let image = resourceIcons.image(bundleID: item.bundleID, bundleURL: url) {
+                button.image = image
+                button.imageScaling = .scaleProportionallyDown
+                button.imagePosition = .imageOnly
+            } else { button.imagePosition = .noImage }
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            button.isBordered = false
+            button.bezelStyle = .regularSquare
+            button.toolTip = item.label
+            button.setAccessibilityLabel(item.label)
+            document.addSubview(button)
+        }
+        let visibleHeight = itemsScroll?.contentSize.height ?? height
+        document.scroll(NSPoint(x: 0, y: max(0, height - visibleHeight)))
+    }
+
+    @objc private func activateShelfItem(_ sender: NSButton) {
+        guard items.indices.contains(sender.tag) else { return }
+        hoverCloseTask?.cancel()
+        contextMenuActive = true
+        showActionStatus("Открываем меню…")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        activateItem?(items[sender.tag].id)
+    }
+
+    func showContextMenu(_ entries: [MenuBarScanner.MenuEntry], for id: UUID, perform: @escaping (UUID) -> Void) {
+        guard panel?.isVisible == true else { cancelContextMenuRequest(""); return }
+        if !NSApplication.shared.isActive {
+            pendingContextMenu = (entries, id, perform)
+            activationTimeout?.cancel()
+            activationTimeout = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                self?.cancelContextMenuRequest("macOS не активировала окно для показа меню.")
+            }
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            return
+        }
+        defer { contextMenuActive = false; scheduleHoverClose() }
+        guard panel?.isVisible == true, let index = items.firstIndex(where: { $0.id == id }),
+              let button = itemsDocument?.subviews.compactMap({ $0 as? NSButton }).first(where: { $0.tag == index }) else { return }
+        contextAction = perform
+        showActionStatus("")
+        defer { contextAction = nil }
+        let menu = makeContextMenu(entries)
+        if menu.items.isEmpty {
+            let message = NSMenuItem(title: "Приложение не предоставляет меню для шторки", action: nil, keyEquivalent: "")
+            message.isEnabled = false
+            menu.addItem(message)
+        }
+        let cell = Self.makeDropDownCell(menu: menu)
+        cell.performClick(withFrame: button.bounds, in: button)
+    }
+
+    static func makeDropDownCell(menu: NSMenu) -> NSPopUpButtonCell {
+        let cell = NSPopUpButtonCell(textCell: "", pullsDown: true)
+        cell.preferredEdge = .minY
+        cell.arrowPosition = .noArrow
+        cell.isBordered = false
+        // A pull-down reserves its first item for the closed control's title.
+        menu.insertItem(NSMenuItem(title: "", action: nil, keyEquivalent: ""), at: 0)
+        cell.menu = menu
+        cell.altersStateOfSelectedItem = false
+        return cell
+    }
+
+    func makeContextMenu(_ entries: [MenuBarScanner.MenuEntry]) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for entry in entries {
+            if entry.separator { menu.addItem(.separator()); continue }
+            let item = NSMenuItem(title: entry.title, action: entry.actionID == nil ? nil : #selector(performContextAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = entry.actionID?.uuidString
+            item.isEnabled = entry.enabled
+            item.state = entry.checked ? .on : .off
+            if !entry.children.isEmpty { item.submenu = makeContextMenu(entry.children) }
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func performContextAction(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String, let id = UUID(uuidString: value) else { return }
+        contextAction?(id)
+    }
 
     override init() {
         super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(applicationActivated), name: NSApplication.didBecomeActiveNotification, object: nil)
         displays.onChange = { [weak self] _ in self?.screenChanged() }
         for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification] {
             NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screenChanged), name: name, object: nil)
@@ -27,38 +240,62 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         guard let screen = DisplayPolicy.target(in: displays.snapshots,
             sourceID: ScreenDisplayProvider.runtimeID(of: button.window?.screen),
             pointer: NSEvent.mouseLocation, mainID: ScreenDisplayProvider.runtimeID(of: NSScreen.main)) else { return }
-        let mode = DisplayProfilePolicy.mode(for: screen, among: displays.snapshots, settings: settings)
-        if mode == .minimal { close(); onSettings?(); return }
         let source = button.window?.convertToScreen(button.convert(button.bounds, to: nil)) ?? .zero
-        guard let placement = ShelfGeometry.placement(visibleFrame: screen.visibleFrame, screenFrame: screen.frame,
-            hasNotch: (mode == .automatic || mode == .notch) && screen.hasNotch,
-            sourceX: source.midX) else { return }
+        present(on: screen, sourceX: source.midX, anchor: button, settings: settings, hover: false)
+    }
+
+    private func present(on screen: DisplaySnapshot, sourceX: CGFloat, anchor: NSStatusBarButton?, settings: ShelfSettings, hover: Bool) {
+        resourceIcons.invalidate()
+        let mode = DisplayProfilePolicy.mode(for: screen, among: displays.snapshots, settings: settings)
+        if mode == .minimal { if !hover { onSettings?() }; return }
+        guard let nativeScreen = NSScreen.screens.first(where: { ScreenDisplayProvider.runtimeID(of: $0) == screen.runtimeID }) else { return }
+        let cutout: CGRect?
+        if screen.hasNotch, let left = nativeScreen.auxiliaryTopLeftArea?.maxX, let right = nativeScreen.auxiliaryTopRightArea?.minX {
+            cutout = CGRect(x: left, y: screen.frame.maxY - nativeScreen.safeAreaInsets.top,
+                            width: right - left, height: nativeScreen.safeAreaInsets.top)
+        } else { cutout = nil }
+        let menuBarHeight = max(NSStatusBar.system.thickness, screen.frame.maxY - screen.visibleFrame.maxY)
+        guard let layout = NotchShelfGeometry.layout(screen: screen.frame, cutout: cutout, itemCount: items.count, menuBarHeight: menuBarHeight) else { return }
+        openedByHover = hover
         transitionID = UUID()
         let currentTransition = transitionID
+        state.cancel()
         state.requestOpen()
+        collapsedFrame = layout.collapsed
+        expandedHoverFrame = layout.expanded
+        contentTopInset = layout.contentTopInset
+        bodyWidth = layout.body.width
         let window = panel ?? makePanel()
         panel = window
-        anchorButton = button
+        if let background = window.contentView as? ShelfHoverEffectView {
+            background.neckWidth = layout.neckWidth
+            background.neckHeight = layout.neckHeight
+            background.bodyWidth = layout.body.width
+            background.bodyHeight = layout.body.height
+        }
+        anchorButton = anchor
         dismissArmed = false
-        window.setFrame(placement.frame, display: false)
         let duration = ShelfAnimationPolicy.duration(settings: settings,
             reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
-        window.alphaValue = duration > 0 ? 0 : 1
-        window.makeKeyAndOrderFront(nil)
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        window.setFrame(duration > 0 ? layout.collapsed : layout.expanded, display: false)
+        window.alphaValue = 1
+        if hover { window.orderFrontRegardless() } else { window.makeKeyAndOrderFront(nil) }
+        if !hover { NSApplication.shared.activate(ignoringOtherApps: true) }
+        layoutPanelContent(size: layout.expanded.size)
         if duration > 0 {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = duration
-                window.animator().alphaValue = 1
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                window.animator().setFrame(layout.expanded, display: true)
             } completionHandler: { [weak self] in
                 Task { @MainActor [weak self] in
                     guard let self, self.transitionID == currentTransition else { return }
+                    self.layoutPanelContent(size: layout.expanded.size)
                     self.state.finishOpening()
+                    self.scheduleHoverClose()
                 }
             }
-        } else {
-            state.finishOpening()
-        }
+        } else { state.finishOpening() }
         installMonitors()
         // Текущий mouseDown не должен считаться кликом снаружи.
         dismissGeneration += 1
@@ -70,63 +307,55 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
     }
 
     private func makePanel() -> NSPanel {
-        let window = NSPanel(contentRect: .zero, styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        let window = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.title = "Notch Shelf"
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
+        window.becomesKeyOnlyIfNeeded = true
         window.isFloatingPanel = true
-        window.level = .floating
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         window.hidesOnDeactivate = false
         window.delegate = self
-        let background = NSVisualEffectView()
-        background.material = .popover
-        background.blendingMode = .behindWindow
-        background.state = .active
+        let background = ShelfHoverEffectView()
+        background.onEnter = { [weak self] in self?.hoverCloseTask?.cancel() }
+        background.onExit = { [weak self] in self?.scheduleHoverClose() }
+        background.wantsLayer = true
+        background.layer?.backgroundColor = NSColor.black.cgColor
+        background.layer?.masksToBounds = true
         window.contentView = background
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = true
-        background.addSubview(scroll)
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 145))
-        let title = NSTextField(labelWithString: "Notch Shelf")
-        title.font = .systemFont(ofSize: 19, weight: .semibold)
-        title.frame = NSRect(x: 12, y: 105, width: 290, height: 28)
-        let message = NSTextField(wrappingLabelWithString: "Ваше пространство в строке меню.\nДиагностика и управление доступны в настройках.")
-        message.textColor = .secondaryLabelColor
-        message.frame = NSRect(x: 12, y: 46, width: 290, height: 50)
-        content.addSubview(title)
-        content.addSubview(message)
-        let settings = NSButton(image: NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Открыть настройки") ?? NSImage(),
-                                target: self, action: #selector(openSettings))
-        settings.bezelStyle = .recessed
-        settings.toolTip = "Настройки Notch Shelf"
-        settings.frame = NSRect(x: 230, y: 6, width: 34, height: 32)
-        content.addSubview(settings)
-        let quit = NSButton(image: NSImage(systemSymbolName: "power", accessibilityDescription: "Выйти из Notch Shelf") ?? NSImage(),
-                            target: NSApplication.shared, action: #selector(NSApplication.terminate(_:)))
-        quit.bezelStyle = .recessed
-        quit.toolTip = "Выйти из Notch Shelf"
-        quit.frame = NSRect(x: 274, y: 6, width: 34, height: 32)
-        content.addSubview(quit)
-        scroll.documentView = content
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 12),
-            scroll.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -12),
-            scroll.topAnchor.constraint(equalTo: background.topAnchor, constant: 12),
-            scroll.bottomAnchor.constraint(equalTo: background.bottomAnchor, constant: -12)
-        ])
+        let itemScroll = NSScrollView()
+        itemScroll.drawsBackground = false
+        itemScroll.hasVerticalScroller = true
+        itemScroll.autohidesScrollers = true
+        itemScroll.scrollerStyle = .overlay
+        let document = NSView()
+        itemScroll.documentView = document
+        background.addSubview(itemScroll)
+        itemsScroll = itemScroll
+        itemsDocument = document
+        let status = NSTextField(labelWithString: "")
+        status.font = .systemFont(ofSize: 10)
+        status.textColor = .white.withAlphaComponent(0.7)
+        status.lineBreakMode = .byTruncatingTail
+        background.addSubview(status)
+        actionStatusLabel = status
         return window
     }
 
-    @objc private func openSettings() { onSettings?() }
+    private func layoutPanelContent(size: CGSize) {
+        itemsScroll?.frame = CGRect(x: (size.width - bodyWidth) / 2 + 16, y: 16, width: max(44, bodyWidth - 32), height: max(44, size.height - contentTopInset - 16))
+        actionStatusLabel?.frame = CGRect(x: (size.width - bodyWidth) / 2 + 16, y: 0, width: max(44, bodyWidth - 32), height: 16)
+        updateItemButtons()
+    }
 
     private func installMonitors() {
         removeMonitors()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
             guard let self else { return event }
+            if self.contextMenuActive { return event }
             if event.type == .keyDown {
                 if event.keyCode == 53 { self.close(); return nil }
                 return event
@@ -135,9 +364,13 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
             if self.outsideClickShouldClose() { self.close() }
             return event
         }
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            guard let self, self.outsideClickShouldClose() else { return }
-            self.close()
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
+            guard let self, !self.contextMenuActive else { return }
+            if event.type == .keyDown {
+                if event.keyCode == 53 { self.close() }
+                return
+            }
+            if self.outsideClickShouldClose() { self.close() }
         }
     }
 
@@ -158,35 +391,129 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         globalMonitor = nil
     }
 
-    func close() {
+    func close(animated: Bool = true) {
+        pendingContextMenu = nil
+        activationTimeout?.cancel()
+        activationTimeout = nil
+        hoverCloseTask?.cancel()
+        hoverCloseTask = nil
+        openedByHover = false
+        expandedHoverFrame = nil
+        contextMenuActive = false
         transitionID = UUID()
+        let closingTransition = transitionID
         state.requestClose()
-        panel?.orderOut(nil)
-        // Перебить незавершённый fade без ожидания и очереди переходов.
-        if let panel {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0
-                panel.animator().alphaValue = 1
-            }
-        }
         removeMonitors()
         anchorButton = nil
         dismissArmed = false
         dismissGeneration += 1
-        state.finishClosing()
+        let settings = hoverSettings?() ?? .defaults
+        let duration = animated ? min(0.18, ShelfAnimationPolicy.duration(settings: settings,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)) : 0
+        if duration > 0, let window = panel, window.isVisible, let collapsedFrame {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = duration
+                context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                window.animator().setFrame(collapsedFrame, display: true)
+            } completionHandler: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, self.transitionID == closingTransition else { return }
+                    self.panel?.orderOut(nil)
+                    self.state.finishClosing()
+                }
+            }
+        } else {
+            panel?.orderOut(nil)
+            state.finishClosing()
+        }
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        if outsideClickShouldClose() { close() }
+        if !contextMenuActive && outsideClickShouldClose() { close() }
     }
-    @objc private func screenChanged() { close(); state.cancel() }
+    @objc private func screenChanged() { close(animated: false); state.cancel(); rebuildHoverWindows() }
 
     func stop() {
-        close()
+        close(animated: false)
+        hoverWindows.forEach { $0.orderOut(nil) }
+        hoverWindows.removeAll()
+        hoverSettings = nil
         displays.stop()
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         panel?.delegate = nil
         panel = nil
     }
+}
+
+
+@MainActor
+private final class ShelfHoverView: NSView {
+    var virtualNotch = false
+    var onEnter: (() -> Void)?
+    var onExit: (() -> Void)?
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { onEnter?() }
+    override func mouseExited(with event: NSEvent) { onExit?() }
+    override func mouseDown(with event: NSEvent) { onEnter?() }
+    override func draw(_ dirtyRect: NSRect) {
+        guard virtualNotch else { return }
+        NSColor.black.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 7, yRadius: 7).fill()
+        NSColor.white.withAlphaComponent(0.65).setFill()
+        NSBezierPath(roundedRect: NSRect(x: bounds.midX - 12, y: 5, width: 24, height: 2), xRadius: 1, yRadius: 1).fill()
+    }
+}
+
+@MainActor
+private final class ShelfHoverEffectView: NSView {
+    var neckWidth: CGFloat = 180 { didSet { updateShape() } }
+    var neckHeight: CGFloat = 24 { didSet { updateShape() } }
+    var bodyWidth: CGFloat = 180 { didSet { updateShape() } }
+    var bodyHeight: CGFloat = 80 { didSet { updateShape() } }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        if let path = (layer?.mask as? CAShapeLayer)?.path, !path.contains(local) { return nil }
+        return super.hitTest(point)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateShape()
+    }
+
+    private func updateShape() {
+        guard let layer else { return }
+        let mask = (layer.mask as? CAShapeLayer) ?? CAShapeLayer()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        mask.frame = bounds
+        let progress = min(1, max(0, (bounds.height - neckHeight) / max(1, bodyHeight + 12)))
+        let flowingWidth = neckWidth + (bodyWidth - neckWidth) * progress
+        mask.path = ConnectedShelfShape.path(size: bounds.size, neckWidth: neckWidth, neckHeight: neckHeight, bodyWidth: flowingWidth)
+        layer.mask = mask
+        CATransaction.commit()
+    }
+
+    var onEnter: (() -> Void)?
+    var onExit: (() -> Void)?
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { onEnter?() }
+    override func mouseExited(with event: NSEvent) { onExit?() }
+}
+
+
+@MainActor
+final class ShelfItemButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var needsPanelToBecomeKey: Bool { false }
 }
