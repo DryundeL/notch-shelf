@@ -33,19 +33,28 @@ actor MenuBarScanner {
         for candidate in candidates {
             guard !Task.isCancelled, ContinuousClock.now < deadline else { break }
             guard let element = elements[candidate.id] else { continue }
-            var position: CFTypeRef?, size: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &position) == .success,
-                  AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &size) == .success,
-                  let position, let size, CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { continue }
-            let pointValue = unsafeDowncast(position, to: AXValue.self), sizeValue = unsafeDowncast(size, to: AXValue.self)
-            var point = CGPoint.zero, dimensions = CGSize.zero
-            guard AXValueGetType(pointValue) == .cgPoint, AXValueGetType(sizeValue) == .cgSize,
-                  AXValueGetValue(pointValue, .cgPoint, &point), AXValueGetValue(sizeValue, .cgSize, &dimensions),
-                  [point.x, point.y, dimensions.width, dimensions.height].allSatisfy(\.isFinite),
-                  dimensions.width > 0, dimensions.width <= 1024, dimensions.height > 0, dimensions.height <= 128 else { continue }
-            result[candidate.id] = CGRect(origin: point, size: dimensions)
+            result[candidate.id] = Self.frame(of: element)
         }
         return result
+    }
+
+    /// Current AX frame of one scanned item (top-left origin), or nil if it is gone or implausible.
+    func itemFrame(_ id: UUID) -> CGRect? {
+        guard AXIsProcessTrusted(), !Task.isCancelled, let element = elements[id] else { return nil }
+        return Self.frame(of: element)
+    }
+
+    private static func frame(of element: AXUIElement) -> CGRect? {
+        var position: CFTypeRef?, size: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &position) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &size) == .success,
+              let position, let size, CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        let pointValue = unsafeDowncast(position, to: AXValue.self), sizeValue = unsafeDowncast(size, to: AXValue.self)
+        var point = CGPoint.zero, dimensions = CGSize.zero
+        guard AXValueGetType(pointValue) == .cgPoint, AXValueGetType(sizeValue) == .cgSize,
+              AXValueGetValue(pointValue, .cgPoint, &point), AXValueGetValue(sizeValue, .cgSize, &dimensions) else { return nil }
+        let frame = CGRect(origin: point, size: dimensions)
+        return StatusItemClickPolicy.isPlausibleItemFrame(frame) ? frame : nil
     }
 
     func press(_ id: UUID) -> String {

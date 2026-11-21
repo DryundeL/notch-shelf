@@ -4,7 +4,9 @@ import QuartzCore
 @MainActor
 final class ShelfPanelController: NSObject, NSWindowDelegate {
     var onSettings: (() -> Void)?
+    /// Shared and owned by the caller; this controller only subscribes.
     private let displays: any DisplayProvider
+    private var displayObserver: UUID?
     private let applicationNotifications: NotificationCenter
     private let workspaceNotifications: NotificationCenter
     private(set) var isHoverSuspended = false
@@ -119,11 +121,11 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         }
     }
     private var items: [MenuBarScanner.Candidate] = []
-    private var activateItem: ((UUID) -> Void)?
+    private var activateItem: ((UUID, ShelfItemClick) -> Void)?
     private weak var itemsDocument: NSView?
     private weak var itemsScroll: NSScrollView?
 
-    func setItems(_ candidates: [MenuBarScanner.Candidate], activate: @escaping (UUID) -> Void) {
+    func setItems(_ candidates: [MenuBarScanner.Candidate], activate: @escaping (UUID, ShelfItemClick) -> Void) {
         contextMenuActive = false
         resourceIcons.invalidate()
         items = candidates
@@ -170,11 +172,13 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
 
     @objc private func activateShelfItem(_ sender: NSButton) {
         guard items.indices.contains(sender.tag) else { return }
+        // Read before activation: the click kind is forwarded to the original item as is.
+        let click = ShelfItemClick.current()
         hoverCloseTask?.cancel()
         contextMenuActive = true
         showActionStatus(L("Открываем меню…"))
         NSApplication.shared.activate(ignoringOtherApps: true)
-        activateItem?(items[sender.tag].id)
+        activateItem?(items[sender.tag].id, click)
     }
 
     func showContextMenu(_ entries: [MenuBarScanner.MenuEntry], for id: UUID, perform: @escaping (UUID) -> Void) {
@@ -238,10 +242,6 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         contextAction?(id)
     }
 
-    override convenience init() {
-        self.init(displays: ScreenDisplayProvider())
-    }
-
     init(displays: any DisplayProvider, applicationNotifications: NotificationCenter = .default,
          workspaceNotifications: NotificationCenter = NSWorkspace.shared.notificationCenter) {
         self.displays = displays
@@ -249,7 +249,7 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         self.workspaceNotifications = workspaceNotifications
         super.init()
         applicationNotifications.addObserver(self, selector: #selector(applicationActivated), name: NSApplication.didBecomeActiveNotification, object: nil)
-        displays.onChange = { [weak self] _ in self?.screenChanged() }
+        displayObserver = displays.addObserver { [weak self] _ in self?.screenChanged() }
         workspaceNotifications.addObserver(self, selector: #selector(screenChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         workspaceNotifications.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         workspaceNotifications.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
@@ -489,7 +489,7 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         isHoverSuspended = false
         let previous = displays.snapshots
         displays.refresh()
-        // A changed snapshot already rebuilds through onChange.
+        // A changed snapshot already rebuilds through the display observer.
         if displays.snapshots == previous { screenChanged() }
     }
 
@@ -498,7 +498,8 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         hoverWindows.forEach { $0.orderOut(nil) }
         hoverWindows.removeAll()
         hoverSettings = nil
-        displays.stop()
+        if let displayObserver { displays.removeObserver(displayObserver) }
+        displayObserver = nil
         applicationNotifications.removeObserver(self)
         workspaceNotifications.removeObserver(self)
         panel?.delegate = nil

@@ -6,7 +6,9 @@ final class SettingsModel: ObservableObject {
     @Published private(set) var settings: ShelfSettings
     @Published var errorMessage: String?
     @Published private(set) var displays: [DisplaySnapshot] = []
-    private let displayProvider = ScreenDisplayProvider()
+    /// Shared with the shelf and owned by the app; nil in tests that do not need displays.
+    private let displayProvider: (any DisplayProvider)?
+    private var displayObserver: UUID?
     @Published private(set) var loginItemStatus: LoginItemStatus
     private let loginItem: any LoginItemService
     @Published private(set) var menuBarItems: [MenuBarScanner.Candidate] = []
@@ -46,6 +48,9 @@ final class SettingsModel: ObservableObject {
     private var appliedPIDs: Set<pid_t> = []
     private var reconciling = false
     private var reconcileAgain = false
+    private var reconcileForced = false
+    /// Hidden owner shown in the menu bar for the duration of one forwarded click.
+    private(set) var revealedBundleID: String?
 
     /// A restriction is applied or being applied; process changes are handled here, not by a full rescan.
     var isVisibilityActive: Bool { visibilityBusy || !appliedSelection.isEmpty }
@@ -54,7 +59,7 @@ final class SettingsModel: ObservableObject {
     var onSectionModeChanged: (() -> Void)?
     private let store: any SettingsStore
 
-    init(store: any SettingsStore, loginItem: any LoginItemService = SystemLoginItemService(), recovery: (any VisibilityRecoveryStore)? = nil,
+    init(store: any SettingsStore, displays displayProvider: (any DisplayProvider)? = nil, loginItem: any LoginItemService = SystemLoginItemService(), recovery: (any VisibilityRecoveryStore)? = nil,
          iconAvailability: ((MenuBarScanner.Candidate) -> Bool)? = nil,
          accessibilityTrusted: @escaping () -> Bool = { AXIsProcessTrusted() },
          nativeVisibility: any NativeVisibilityService = NSHNativeVisibility(),
@@ -62,6 +67,7 @@ final class SettingsModel: ObservableObject {
          runningProcesses: @escaping () -> [MenuBarScanner.Process] = {
              NSWorkspace.shared.runningApplications.map { .init(pid: $0.processIdentifier, bundleID: $0.bundleIdentifier ?? "", name: $0.localizedName ?? "") }
          }) {
+        self.displayProvider = displayProvider
         self.nativeVisibility = nativeVisibility
         self.installedApplication = installedApplication
         self.runningProcesses = runningProcesses
@@ -74,8 +80,8 @@ final class SettingsModel: ObservableObject {
         self.store = store
         settings = store.load()
         pendingHiddenBundleIDs = Set(settings.hiddenBundleIDs)
-        displays = displayProvider.snapshots
-        displayProvider.onChange = { [weak self] in self?.displays = $0 }
+        displays = displayProvider?.snapshots ?? []
+        displayObserver = displayProvider?.addObserver { [weak self] in self?.displays = $0 }
     }
 
     func refreshLoginItem() { loginItemStatus = loginItem.status }
@@ -128,6 +134,8 @@ final class SettingsModel: ObservableObject {
         appliedPIDs = []
         reconciling = false
         reconcileAgain = false
+        reconcileForced = false
+        revealedBundleID = nil
         nativeVisibility.restore()
         recovery?.clear()
         hiddenCandidates = []
@@ -264,32 +272,77 @@ final class SettingsModel: ObservableObject {
     /// every hidden icon, rescanning and hiding again (the visible flicker). The allow-list is
     /// replaced in place; a newly launched unrelated app becomes visible as soon as it is allowed.
     /// Only a (re)launch of a hidden owner needs a rescan, because its new status items must be discovered.
-    func runningApplicationsDidChange() {
-        guard !appliedSelection.isEmpty, !visibilityBusy else { return }
-        if reconciling { reconcileAgain = true; return }
+    func runningApplicationsDidChange() { reconcile(force: false, completion: nil) }
+
+    /// Shows one hidden owner in the menu bar so a click can reach its real status item.
+    /// The restriction stays in force for every other owner and is swapped without a gap.
+    /// `completion` is called exactly once: nil when the owner is visible, otherwise the reason.
+    func revealTemporarily(_ bundleID: String, completion: @escaping @MainActor (String?) -> Void) {
+        guard !appliedSelection.isEmpty, !visibilityBusy, !reconciling, revealedBundleID == nil,
+              hiddenCandidates.contains(where: { $0.bundleID == bundleID }) else {
+            completion(L("Предыдущая операция ещё выполняется.")); return
+        }
+        revealedBundleID = bundleID
+        reconcile(force: true) { [weak self] message in
+            if message != nil, self?.revealedBundleID == bundleID { self?.revealedBundleID = nil }
+            completion(message)
+        }
+    }
+
+    /// Hides the temporarily shown owner again. Safe to call after a reset: then it does nothing.
+    func endTemporaryReveal() {
+        guard revealedBundleID != nil else { return }
+        revealedBundleID = nil
+        guard !appliedSelection.isEmpty else { return }
+        if reconciling { reconcileAgain = true; reconcileForced = true; return }
+        reconcile(force: true, completion: nil)
+    }
+
+    /// Bundle IDs the menu bar may show: everything except hidden owners; a revealed owner is allowed.
+    private func allowList(running: [String]) -> [String]? {
+        let own = Bundle.main.bundleIdentifier ?? ""
+        var selected = appliedSelection.intersection(running)
+        if let revealedBundleID { selected.remove(revealedBundleID) }
+        guard selected.isEmpty else {
+            return NativeVisibilityPolicy.allowedBundleIDs(running: running, selected: selected, own: own)
+        }
+        // The revealed owner was the only hidden one: keep the assertion (no flash on re-hide) but allow all.
+        guard revealedBundleID != nil, !own.isEmpty, running.count <= 512 else { return nil }
+        return Array(Set(running).union([own])).sorted()
+    }
+
+    private func reconcile(force: Bool, completion: (@MainActor (String?) -> Void)?) {
+        guard !appliedSelection.isEmpty, !visibilityBusy else { completion?(L("Ограничение не активно.")); return }
+        if reconciling {
+            reconcileAgain = true
+            reconcileForced = reconcileForced || force
+            completion?(L("Предыдущая операция ещё выполняется."))
+            return
+        }
         let apps = runningProcesses()
         let pids = Set(apps.map(\.pid))
-        guard pids != appliedPIDs else { return }
+        guard force || pids != appliedPIDs else { completion?(nil); return }
         let ownerLaunched = apps.contains { !appliedPIDs.contains($0.pid) && appliedSelection.contains($0.bundleID) }
         let running = apps.map(\.bundleID).filter { !$0.isEmpty }
-        let selected = appliedSelection.intersection(running)
-        let own = Bundle.main.bundleIdentifier ?? ""
-        guard !ownerLaunched, !selected.isEmpty,
-              let allowed = NativeVisibilityPolicy.allowedBundleIDs(running: running, selected: selected, own: own) else {
+        guard !ownerLaunched, let allowed = allowList(running: running) else {
             restoreVisibility(resetSection: false)
             onInventoryChanged?()
+            completion?(L("Список приложений изменился. Значки возвращены."))
             return
         }
         let generation = visibilityGeneration
         reconciling = true
         nativeVisibility.hide(withAllowedBundleIDs: allowed) { [weak self] message in
             Task { @MainActor [weak self] in
-                guard let self, self.visibilityGeneration == generation else { return }
+                guard let self, self.visibilityGeneration == generation else {
+                    completion?(L("Операция отменена.")); return
+                }
                 self.reconciling = false
                 if let message {
                     self.restoreVisibility()
                     self.visibilityNeedsExplicitRetry = true
                     self.visibilityMessage = message
+                    completion?(message)
                     return
                 }
                 self.appliedPIDs = pids
@@ -298,15 +351,22 @@ final class SettingsModel: ObservableObject {
                     self.hiddenCandidates = live
                     self.onHiddenItems?(live)
                 }
+                completion?(nil)
                 if self.reconcileAgain {
+                    let forced = self.reconcileForced
                     self.reconcileAgain = false
-                    self.runningApplicationsDidChange()
+                    self.reconcileForced = false
+                    self.reconcile(force: forced, completion: nil)
                 }
             }
         }
     }
 
-    func stop() { restoreVisibility(); displayProvider.stop() }
+    func stop() {
+        restoreVisibility()
+        if let displayObserver { displayProvider?.removeObserver(displayObserver) }
+        displayObserver = nil
+    }
 
     func update(_ change: (inout ShelfSettings) -> Void) {
         let previousSectionMode = settings.menuBarSectionEnabled

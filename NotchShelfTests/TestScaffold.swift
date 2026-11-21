@@ -477,7 +477,7 @@ final class LocalMenuSafetyTests: XCTestCase {
 @MainActor
 final class ShelfContextMenuTests: XCTestCase {
     func testLocalMenuPreservesDisabledCheckedAndSubmenuItems() {
-        let shelf = ShelfPanelController()
+        let shelf = ShelfPanelController(displays: ScreenDisplayProvider())
         let commandID = UUID()
         let submenu = MenuBarScanner.MenuEntry(actionID: commandID, title: "Действие", enabled: true, checked: true, separator: false, children: [])
         let menu = shelf.makeContextMenu([
@@ -790,11 +790,18 @@ final class ShelfContourHoverTests: XCTestCase {
 final class ShelfSleepWakeTests: XCTestCase {
     private final class Displays: DisplayProvider {
         var snapshots: [DisplaySnapshot] = []
-        var onChange: (([DisplaySnapshot]) -> Void)?
+        var observers: [UUID: ([DisplaySnapshot]) -> Void] = [:]
         var refreshCount = 0
         var stopped = false
+        func addObserver(_ handler: @escaping ([DisplaySnapshot]) -> Void) -> UUID {
+            let token = UUID()
+            observers[token] = handler
+            return token
+        }
+        func removeObserver(_ token: UUID) { observers[token] = nil }
+        func notify(_ value: [DisplaySnapshot]) { observers.values.forEach { $0(value) } }
         func refresh() { refreshCount += 1 }
-        func stop() { stopped = true; onChange = nil }
+        func stop() { stopped = true; observers.removeAll() }
     }
 
     func testSleepSuspendsHoverUntilWakeAndRefreshesDisplaysOnce() {
@@ -803,7 +810,7 @@ final class ShelfSleepWakeTests: XCTestCase {
         let controller = ShelfPanelController(displays: displays, applicationNotifications: NotificationCenter(), workspaceNotifications: notifications)
         notifications.post(name: NSWorkspace.willSleepNotification, object: nil)
         XCTAssertTrue(controller.isHoverSuspended)
-        displays.onChange?([])
+        displays.notify([])
         XCTAssertTrue(controller.isHoverSuspended)
         notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
         XCTAssertFalse(controller.isHoverSuspended)
@@ -822,7 +829,28 @@ final class ShelfSleepWakeTests: XCTestCase {
         notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
         XCTAssertFalse(controller.isHoverSuspended)
         XCTAssertEqual(displays.refreshCount, 0)
-        XCTAssertTrue(displays.stopped)
+        // The provider is shared: a consumer unsubscribes but never stops it.
+        XCTAssertTrue(displays.observers.isEmpty)
+        XCTAssertFalse(displays.stopped)
+    }
+
+    func testShelfAndSettingsShareOneProviderAndBothReceiveChanges() {
+        struct Store: SettingsStore {
+            func load() -> ShelfSettings { .defaults }
+            func save(_ settings: ShelfSettings) throws {}
+        }
+        let displays = Displays()
+        let controller = ShelfPanelController(displays: displays, applicationNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter())
+        let model = SettingsModel(store: Store(), displays: displays)
+        XCTAssertEqual(displays.observers.count, 2)
+        let snapshot = DisplaySnapshot(runtimeID: 7, frame: CGRect(x: 0, y: 0, width: 800, height: 600),
+                                       visibleFrame: CGRect(x: 0, y: 0, width: 800, height: 576), scale: 2, hasNotch: false)
+        displays.notify([snapshot])
+        XCTAssertEqual(model.displays, [snapshot])
+        model.stop()
+        controller.stop()
+        XCTAssertTrue(displays.observers.isEmpty)
+        XCTAssertFalse(displays.stopped)
     }
 }
 
@@ -1190,5 +1218,171 @@ final class ExplicitRowMembershipTests: XCTestCase {
         var invalid = settings
         invalid.menuBarSectionBundleIDs = ["org.example.One", "org.example.One"]
         XCTAssertFalse(invalid.isValid)
+    }
+}
+
+final class StatusItemClickPolicyTests: XCTestCase {
+    private typealias Window = StatusItemClickPolicy.WindowInfo
+    private let item = CGRect(x: 1200, y: 0, width: 30, height: 24)
+
+    func testMatchesOnlyTheOwnersSingleStatusWindowAtTheItemFrame() {
+        let own = Window(id: 7, pid: 42, layer: 25, bounds: item)
+        let windows = [own,
+                       Window(id: 8, pid: 43, layer: 25, bounds: item),          // other owner
+                       Window(id: 9, pid: 42, layer: 0, bounds: item),           // document window
+                       Window(id: 10, pid: 42, layer: 25, bounds: item.offsetBy(dx: 40, dy: 0))]
+        XCTAssertEqual(StatusItemClickPolicy.statusWindow(for: item, pid: 42, windows: windows), own)
+        XCTAssertNil(StatusItemClickPolicy.statusWindow(for: item, pid: 44, windows: windows))
+    }
+
+    func testAmbiguousOrImplausibleFramesAreRefused() {
+        let twin = [Window(id: 1, pid: 42, layer: 25, bounds: item), Window(id: 2, pid: 42, layer: 25, bounds: item)]
+        XCTAssertNil(StatusItemClickPolicy.statusWindow(for: item, pid: 42, windows: twin))
+        let huge = CGRect(x: 0, y: 0, width: 5000, height: 24)
+        XCTAssertNil(StatusItemClickPolicy.statusWindow(for: huge, pid: 42, windows: [Window(id: 1, pid: 42, layer: 25, bounds: huge)]))
+        XCTAssertNil(StatusItemClickPolicy.clickPoint(frame: CGRect(x: CGFloat.nan, y: 0, width: 10, height: 10), menuBars: [], blocked: []))
+    }
+
+    func testClickPointRequiresMenuBarAndAvoidsTheNotch() {
+        let bar = CGRect(x: 0, y: 0, width: 1512, height: 38)
+        let notch = CGRect(x: 662, y: 0, width: 188, height: 38)
+        XCTAssertEqual(StatusItemClickPolicy.clickPoint(frame: item, menuBars: [bar], blocked: [notch]), CGPoint(x: 1215, y: 12))
+        let underNotch = CGRect(x: 840, y: 0, width: 30, height: 24)
+        XCTAssertNil(StatusItemClickPolicy.clickPoint(frame: underNotch, menuBars: [bar], blocked: [notch]))
+        XCTAssertNil(StatusItemClickPolicy.clickPoint(frame: item.offsetBy(dx: 0, dy: 300), menuBars: [bar], blocked: []))
+    }
+
+    func testOpenedWindowsIgnoreExistingAndDocumentWindows() {
+        let now = [Window(id: 1, pid: 42, layer: 25, bounds: item),
+                   Window(id: 2, pid: 42, layer: 101, bounds: .zero),
+                   Window(id: 3, pid: 42, layer: 0, bounds: .zero),
+                   Window(id: 4, pid: 43, layer: 101, bounds: .zero)]
+        XCTAssertEqual(StatusItemClickPolicy.openedWindows(before: [1], now: now, pid: 42), [2])
+    }
+
+    func testTopLeftConversion() {
+        let converted = StatusItemClickPolicy.topLeftRect(CGRect(x: 10, y: 944, width: 100, height: 38), primaryScreenMaxY: 982)
+        XCTAssertEqual(converted, CGRect(x: 10, y: 0, width: 100, height: 38))
+    }
+}
+
+@MainActor
+final class TemporaryRevealTests: XCTestCase {
+    private final class Store: SettingsStore {
+        var value = ShelfSettings.defaults
+        init(hidden: [String]) { value.hiddenBundleIDs = hidden }
+        func load() -> ShelfSettings { value }
+        func save(_ settings: ShelfSettings) throws { value = settings }
+    }
+    private final class Service: NativeVisibilityService {
+        var allowed: [String] = []
+        var hideCount = 0
+        var restoreCount = 0
+        var completion: (@Sendable (String?) -> Void)?
+        func hide(withAllowedBundleIDs bundleIDs: [String], completion: @escaping @Sendable (String?) -> Void) {
+            hideCount += 1
+            allowed = bundleIDs
+            self.completion = completion
+        }
+        func restore() { restoreCount += 1 }
+    }
+    private let processes = [MenuBarScanner.Process(pid: 1, bundleID: "org.example.A", name: "A"),
+                             .init(pid: 2, bundleID: "org.example.B", name: "B"),
+                             .init(pid: 3, bundleID: "org.example.Other", name: "Other")]
+
+    private func hiddenModel(_ service: Service, hidden: [String]) async -> SettingsModel {
+        let processes = self.processes
+        let model = SettingsModel(store: Store(hidden: hidden), iconAvailability: { _ in true }, accessibilityTrusted: { true },
+            nativeVisibility: service, installedApplication: { true }, runningProcesses: { processes })
+        model.setMenuBarItems(processes.map { .init(id: UUID(), pid: $0.pid, bundleID: $0.bundleID, label: $0.name) })
+        let applied = expectation(description: "Hidden")
+        model.onHiddenItems = { if !$0.isEmpty { applied.fulfill() } }
+        model.applyHiddenApplications(saveSelection: false)
+        service.completion?(nil)
+        await fulfillment(of: [applied], timeout: 2)
+        model.onHiddenItems = nil
+        return model
+    }
+
+    private func reveal(_ model: SettingsModel, _ bundleID: String, _ service: Service) async -> String? {
+        let done = expectation(description: "Revealed")
+        var result: String? = "pending"
+        model.revealTemporarily(bundleID) { result = $0; done.fulfill() }
+        service.completion?(nil)
+        await fulfillment(of: [done], timeout: 2)
+        return result
+    }
+
+    func testRevealAllowsOnlyTheTargetAndReHidesWithoutRestoring() async {
+        let service = Service()
+        let model = await hiddenModel(service, hidden: ["org.example.A", "org.example.B"])
+        let restores = service.restoreCount
+        let result = await reveal(model, "org.example.A", service)
+        XCTAssertNil(result)
+        XCTAssertTrue(service.allowed.contains("org.example.A"))
+        XCTAssertFalse(service.allowed.contains("org.example.B"))
+        XCTAssertEqual(model.revealedBundleID, "org.example.A")
+        model.endTemporaryReveal()
+        XCTAssertNil(model.revealedBundleID)
+        XCTAssertFalse(service.allowed.contains("org.example.A"))
+        XCTAssertFalse(service.allowed.contains("org.example.B"))
+        XCTAssertEqual(service.restoreCount, restores, "Swaps must never drop the restriction (no flash)")
+        XCTAssertEqual(model.hiddenCandidates.count, 2, "The shelf keeps its items while one is revealed")
+        model.stop()
+    }
+
+    func testRevealingTheOnlyHiddenOwnerKeepsTheAssertion() async {
+        let service = Service()
+        let model = await hiddenModel(service, hidden: ["org.example.A"])
+        let restores = service.restoreCount
+        let result = await reveal(model, "org.example.A", service)
+        XCTAssertNil(result)
+        XCTAssertTrue(service.allowed.contains("org.example.A"))
+        XCTAssertEqual(service.restoreCount, restores)
+        XCTAssertTrue(model.isVisibilityActive)
+        model.endTemporaryReveal()
+        XCTAssertFalse(service.allowed.contains("org.example.A"))
+        model.stop()
+    }
+
+    func testRefusesUnknownOwnerAndConcurrentReveal() async {
+        let service = Service()
+        let model = await hiddenModel(service, hidden: ["org.example.A", "org.example.B"])
+        var refusal: String?
+        model.revealTemporarily("org.example.Other") { refusal = $0 }
+        XCTAssertNotNil(refusal)
+        model.revealTemporarily("org.example.A") { _ in }
+        var second: String?
+        model.revealTemporarily("org.example.B") { second = $0 }
+        XCTAssertNotNil(second)
+        model.stop()
+    }
+
+    func testFailedRevealSwapRestoresAndReportsOnce() async {
+        let service = Service()
+        let model = await hiddenModel(service, hidden: ["org.example.A"])
+        let done = expectation(description: "Reported")
+        var calls = 0
+        var result: String?
+        model.revealTemporarily("org.example.A") { calls += 1; result = $0; done.fulfill() }
+        service.completion?("Test failure")
+        await fulfillment(of: [done], timeout: 2)
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(result, "Test failure")
+        XCTAssertNil(model.revealedBundleID)
+        XCTAssertFalse(model.isVisibilityActive)
+        model.stop()
+    }
+
+    func testResetDuringRevealStillCompletes() async {
+        let service = Service()
+        let model = await hiddenModel(service, hidden: ["org.example.A"])
+        let done = expectation(description: "Completed")
+        model.revealTemporarily("org.example.A") { XCTAssertNotNil($0); done.fulfill() }
+        model.restoreVisibility()
+        service.completion?(nil)
+        await fulfillment(of: [done], timeout: 2)
+        model.endTemporaryReveal()
+        model.stop()
     }
 }

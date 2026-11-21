@@ -4,7 +4,7 @@ import CoreGraphics
 @MainActor
 final class ScreenDisplayProvider: NSObject, DisplayProvider {
     private(set) var snapshots: [DisplaySnapshot] = []
-    var onChange: (([DisplaySnapshot]) -> Void)?
+    private var observers: [UUID: ([DisplaySnapshot]) -> Void] = [:]
     private var pending: Task<Void, Never>?
 
     override init() {
@@ -40,13 +40,22 @@ final class ScreenDisplayProvider: NSObject, DisplayProvider {
         }.sorted { $0.runtimeID < $1.runtimeID }
         guard next != snapshots else { return }
         snapshots = next
-        onChange?(next)
+        // Copy first: a handler may unsubscribe while being notified.
+        for handler in Array(observers.values) { handler(next) }
     }
+
+    func addObserver(_ handler: @escaping ([DisplaySnapshot]) -> Void) -> UUID {
+        let token = UUID()
+        observers[token] = handler
+        return token
+    }
+
+    func removeObserver(_ token: UUID) { observers[token] = nil }
 
     func stop() {
         pending?.cancel()
         pending = nil
-        onChange = nil
+        observers.removeAll()
         NotificationCenter.default.removeObserver(self)
     }
 }

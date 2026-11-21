@@ -7,9 +7,12 @@ import SwiftUI
 final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private let settingsStore = UserDefaultsSettingsStore()
     private var settingsModel: SettingsModel?
-    private let shelf = ShelfPanelController()
+    /// The only display provider in the process; the shelf and the settings model subscribe to it.
+    private let displays = ScreenDisplayProvider()
+    private lazy var shelf = ShelfPanelController(displays: displays)
     private var settingsWindow: NSWindow?
     private let scanner = MenuBarScanner()
+    private let clickForwarder = StatusItemClickForwarder()
     private var candidates: [MenuBarScanner.Candidate] = []
     private var candidatePicker: NSPopUpButton?
     private var actionStatus: NSTextField?
@@ -285,12 +288,12 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     private func ensureSettingsModel() -> SettingsModel {
         if let settingsModel { return settingsModel }
-        let model = SettingsModel(store: settingsStore, recovery: UserDefaultsVisibilityRecoveryStore())
+        let model = SettingsModel(store: settingsStore, displays: displays, recovery: UserDefaultsVisibilityRecoveryStore())
         model.setMenuBarItems(candidates)
         model.onHiddenItems = { [weak self] candidates in
             guard let self else { return }
             self.updateSectionControl()
-            self.shelf.setItems(candidates) { [weak self] id in
+            self.shelf.setItems(candidates) { [weak self] id, click in
                 guard let self else { return }
                 guard self.pressTask == nil,
                       let candidate = self.candidates.first(where: { $0.id == id }),
@@ -303,10 +306,14 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
                     self.showSettings()
                     return
                 }
+                // Option-click is meaningful to many status items: always give it to the original.
+                if click.option { self.forwardClick(to: candidate, click: click); return }
                 self.pressTask = Task { [weak self] in
                     guard let self else { return }
                     let menu = await self.scanner.menuSnapshot(id)
                     self.pressTask = nil
+                    // No AX menu (popover, slider, custom view, lazy menu): the original handles the click.
+                    if menu.isEmpty { self.forwardClick(to: candidate, click: click); return }
                     self.shelf.showContextMenu(menu, for: id) { [weak self] actionID in
                         guard let self, self.pressTask == nil else { return }
                         self.pressTask = Task { [weak self] in
@@ -329,6 +336,65 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
             self.scheduleInventoryRefresh()
         }
         return model
+    }
+
+    /// Briefly shows the hidden owner in the menu bar, clicks its real status item and hides it
+    /// again once whatever the click opened (menu, popover, panel) has closed.
+    private func forwardClick(to candidate: MenuBarScanner.Candidate, click: ShelfItemClick) {
+        guard pressTask == nil, let model = settingsModel else { return }
+        shelf.close()
+        pressTask = Task { [weak self] in
+            guard let self else { return }
+            let message = await self.performForwardedClick(candidate, click: click, model: model)
+            model.endTemporaryReveal()
+            self.pressTask = nil
+            if let message {
+                model.visibilityMessageForActivation(message)
+                self.shelf.showActionStatus(message)
+            }
+        }
+    }
+
+    private func performForwardedClick(_ candidate: MenuBarScanner.Candidate, click: ShelfItemClick, model: SettingsModel) async -> String? {
+        let revealError: String? = await withCheckedContinuation { continuation in
+            model.revealTemporarily(candidate.bundleID) { continuation.resume(returning: $0) }
+        }
+        if let revealError { return revealError }
+        let pid = candidate.pid
+        // The menu bar lays the item out asynchronously; require the same window twice in a row.
+        var target: (frame: CGRect, window: StatusItemClickPolicy.WindowInfo)?
+        var previous: StatusItemClickPolicy.WindowInfo?
+        for _ in 0..<16 {
+            do { try await Task.sleep(for: .milliseconds(50)) } catch { return nil }
+            guard model.revealedBundleID == candidate.bundleID else { return L("Операция отменена.") }
+            guard let frame = await scanner.itemFrame(candidate.id),
+                  let window = StatusItemClickPolicy.statusWindow(for: frame, pid: pid, windows: clickForwarder.windows()) else {
+                previous = nil; continue
+            }
+            if window == previous { target = (frame, window); break }
+            previous = window
+        }
+        guard let target else { return L("Значок не появился в строке меню. Возможно, ему не хватает места рядом с вырезом.") }
+        let baseline: Set<CGWindowID>
+        switch clickForwarder.click(itemFrame: target.frame, window: target.window, click: click) {
+        case .success(let value): baseline = value
+        case .failure(.noPostEventAccess): return L("macOS не разрешила отправку событий. Проверьте доступ Accessibility.")
+        case .failure(.notVisible): return L("Значок оказался за вырезом или вне строки меню; клик не отправлен.")
+        case .failure(.eventCreation): return L("Не удалось создать событие клика.")
+        }
+        // Polling window metadata is cheap and runs only while this one interaction lasts.
+        let clock = ContinuousClock(), start = clock.now
+        var opened = false
+        while true {
+            do { try await Task.sleep(for: .milliseconds(200)) } catch { return nil }
+            guard model.revealedBundleID == candidate.bundleID,
+                  NSRunningApplication(processIdentifier: pid)?.isTerminated == false else { return nil }
+            let extra = StatusItemClickPolicy.openedWindows(before: baseline, now: clickForwarder.windows(), pid: pid)
+            let elapsed = clock.now - start
+            if !extra.isEmpty { opened = true }
+            else if opened || elapsed > .milliseconds(1500) { return nil }
+            if elapsed > .seconds(600) { return nil }
+        }
     }
 
     @objc func showSettings() {
@@ -536,6 +602,8 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
         shelf.stop()
         settingsModel?.stop()
         settingsModel = nil
+        // Stopped last, after every subscriber has unsubscribed.
+        displays.stop()
         settingsWindow?.delegate = nil
         settingsWindow?.close()
         settingsWindow = nil

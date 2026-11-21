@@ -134,3 +134,10 @@
 "Разрешить скрытие через Command-перетаскивание" = "Enable hiding with Command-drag";
 "Удерживая Command, перенесите значок влево от NotchShelf, чтобы добавить его в скрываемую группу, или вправо, чтобы убрать. ЛКМ раскрывает группу, ПКМ открывает меню. Стрелка появляется только для непустой группы." = "Hold Command and drag an icon to the left of NotchShelf to add it to the hidden group, or to the right to remove it. Left-click toggles the group; right-click opens the menu. An arrow appears only when the group is not empty.";
 "Command-перенос влево — скрыть, вправо — вернуть. ЛКМ — группа, ПКМ — меню." = "Command-drag left to hide, right to restore. Left-click: group. Right-click: menu.";
+"Предыдущая операция ещё выполняется." = "The previous operation is still running.";
+"Ограничение не активно." = "The restriction is not active.";
+"Список приложений изменился. Значки возвращены." = "The list of applications changed. Icons were restored.";
+"Значок не появился в строке меню. Возможно, ему не хватает места рядом с вырезом." = "The icon did not appear in the menu bar. It may not have enough room next to the notch.";
+"macOS не разрешила отправку событий. Проверьте доступ Accessibility." = "macOS did not allow sending events. Check Accessibility access.";
+"Значок оказался за вырезом или вне строки меню; клик не отправлен." = "The icon is behind the notch or outside the menu bar; the click was not sent.";
+"Не удалось создать событие клика." = "Could not create the click event.";
