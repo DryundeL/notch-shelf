@@ -40,6 +40,15 @@ final class SettingsModel: ObservableObject {
     @Published private(set) var visibilityPausedAfterCrash: Bool
     private var visibilityGeneration = UUID()
     private var inventoryObservation: NSKeyValueObservation?
+    /// Owners the confirmed restriction targets (shelf + collapsed row), including ones not running now.
+    private var appliedSelection: Set<String> = []
+    /// Processes the confirmed allow-list was computed from.
+    private var appliedPIDs: Set<pid_t> = []
+    private var reconciling = false
+    private var reconcileAgain = false
+
+    /// A restriction is applied or being applied; process changes are handled here, not by a full rescan.
+    var isVisibilityActive: Bool { visibilityBusy || !appliedSelection.isEmpty }
     var onHiddenItems: (([MenuBarScanner.Candidate]) -> Void)?
     var onInventoryChanged: (() -> Void)?
     var onSectionModeChanged: (() -> Void)?
@@ -115,6 +124,10 @@ final class SettingsModel: ObservableObject {
         visibilityGeneration = UUID()
         inventoryObservation?.invalidate()
         inventoryObservation = nil
+        appliedSelection = []
+        appliedPIDs = []
+        reconciling = false
+        reconcileAgain = false
         nativeVisibility.restore()
         recovery?.clear()
         hiddenCandidates = []
@@ -206,10 +219,8 @@ final class SettingsModel: ObservableObject {
         visibilityMessage = L("Применяем выбор…")
         inventoryObservation = NSWorkspace.shared.observe(\.runningApplications, options: []) { [weak self] _, _ in
             Task { @MainActor [weak self] in
-                guard let self, self.visibilityGeneration == generation,
-                      Set(self.runningProcesses().map(\.pid)) != Set(apps.map(\.pid)) else { return }
-                self.restoreVisibility(resetSection: false)
-                self.onInventoryChanged?()
+                guard let self, self.visibilityGeneration == generation else { return }
+                self.runningApplicationsDidChange()
             }
         }
         let committedSettings = next
@@ -218,11 +229,6 @@ final class SettingsModel: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, self.visibilityGeneration == generation else { return }
                 guard self.requireAccessibility() else { return }
-                guard Set(self.runningProcesses().map(\.pid)) == Set(apps.map(\.pid)) else {
-                    self.restoreVisibility()
-                    self.onInventoryChanged?()
-                    return
-                }
                 if let message {
                     self.restoreVisibility()
                     self.visibilityNeedsExplicitRetry = true
@@ -246,6 +252,56 @@ final class SettingsModel: ObservableObject {
                 self.onHiddenItems?(live)
                 self.visibilityMessage = L("Приложений в шторке: %@. Наведите курсор на вырез или нажмите NS.", String(describing: selected.count))
                 if !sectionOwners.isEmpty { self.visibilityMessage = L("Строка свёрнута: %@ приложений. Шторка: %@.", String(describing: sectionOwners.count), String(describing: selected.count)) }
+                self.appliedSelection = allSelected
+                self.appliedPIDs = Set(apps.map(\.pid))
+                // Processes may have changed while the system was confirming.
+                self.runningApplicationsDidChange()
+            }
+        }
+    }
+
+    /// Keeps the restriction in force while unrelated apps launch or quit, instead of revealing
+    /// every hidden icon, rescanning and hiding again (the visible flicker). The allow-list is
+    /// replaced in place; a newly launched unrelated app becomes visible as soon as it is allowed.
+    /// Only a (re)launch of a hidden owner needs a rescan, because its new status items must be discovered.
+    func runningApplicationsDidChange() {
+        guard !appliedSelection.isEmpty, !visibilityBusy else { return }
+        if reconciling { reconcileAgain = true; return }
+        let apps = runningProcesses()
+        let pids = Set(apps.map(\.pid))
+        guard pids != appliedPIDs else { return }
+        let ownerLaunched = apps.contains { !appliedPIDs.contains($0.pid) && appliedSelection.contains($0.bundleID) }
+        let running = apps.map(\.bundleID).filter { !$0.isEmpty }
+        let selected = appliedSelection.intersection(running)
+        let own = Bundle.main.bundleIdentifier ?? ""
+        guard !ownerLaunched, !selected.isEmpty,
+              let allowed = NativeVisibilityPolicy.allowedBundleIDs(running: running, selected: selected, own: own) else {
+            restoreVisibility(resetSection: false)
+            onInventoryChanged?()
+            return
+        }
+        let generation = visibilityGeneration
+        reconciling = true
+        nativeVisibility.hide(withAllowedBundleIDs: allowed) { [weak self] message in
+            Task { @MainActor [weak self] in
+                guard let self, self.visibilityGeneration == generation else { return }
+                self.reconciling = false
+                if let message {
+                    self.restoreVisibility()
+                    self.visibilityNeedsExplicitRetry = true
+                    self.visibilityMessage = message
+                    return
+                }
+                self.appliedPIDs = pids
+                let live = self.hiddenCandidates.filter { pids.contains($0.pid) }
+                if live.count != self.hiddenCandidates.count {
+                    self.hiddenCandidates = live
+                    self.onHiddenItems?(live)
+                }
+                if self.reconcileAgain {
+                    self.reconcileAgain = false
+                    self.runningApplicationsDidChange()
+                }
             }
         }
     }

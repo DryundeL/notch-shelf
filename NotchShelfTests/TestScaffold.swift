@@ -1047,6 +1047,98 @@ final class MenuBarSectionModeTests: XCTestCase {
     }
 }
 
+@MainActor
+final class RunningApplicationsReconcileTests: XCTestCase {
+    private final class Store: SettingsStore {
+        var value = ShelfSettings.defaults
+        init() { value.hiddenBundleIDs = ["org.example.Shelf"] }
+        func load() -> ShelfSettings { value }
+        func save(_ settings: ShelfSettings) throws { value = settings }
+    }
+    private final class Service: NativeVisibilityService {
+        var allowed: [String] = []
+        var hideCount = 0
+        var restoreCount = 0
+        var completion: (@Sendable (String?) -> Void)?
+        func hide(withAllowedBundleIDs bundleIDs: [String], completion: @escaping @Sendable (String?) -> Void) {
+            hideCount += 1
+            allowed = bundleIDs
+            self.completion = completion
+        }
+        func restore() { restoreCount += 1 }
+    }
+    private final class Processes {
+        var value = [MenuBarScanner.Process(pid: 1, bundleID: "org.example.Shelf", name: "Shelf"),
+                     .init(pid: 2, bundleID: "org.example.Other", name: "Other")]
+    }
+
+    private func hiddenModel(_ service: Service, _ processes: Processes) async -> SettingsModel {
+        let model = SettingsModel(store: Store(), iconAvailability: { _ in true }, accessibilityTrusted: { true },
+            nativeVisibility: service, installedApplication: { true }, runningProcesses: { processes.value })
+        model.setMenuBarItems(processes.value.map { .init(id: UUID(), pid: $0.pid, bundleID: $0.bundleID, label: $0.name) })
+        let hidden = expectation(description: "Hidden")
+        model.onHiddenItems = { if !$0.isEmpty { hidden.fulfill() } }
+        model.applyHiddenApplications(saveSelection: false)
+        service.completion?(nil)
+        await fulfillment(of: [hidden], timeout: 2)
+        model.onHiddenItems = nil
+        return model
+    }
+
+    func testUnrelatedLaunchUpdatesAllowListWithoutRevealingHiddenIcons() async {
+        let service = Service(), processes = Processes()
+        let model = await hiddenModel(service, processes)
+        let restoresBefore = service.restoreCount
+        var rescans = 0
+        model.onInventoryChanged = { rescans += 1 }
+        processes.value.append(.init(pid: 3, bundleID: "org.example.New", name: "New"))
+        model.runningApplicationsDidChange()
+        XCTAssertEqual(service.restoreCount, restoresBefore, "Hidden icons must not be revealed")
+        XCTAssertEqual(service.hideCount, 2)
+        XCTAssertTrue(service.allowed.contains("org.example.New"))
+        XCTAssertFalse(service.allowed.contains("org.example.Shelf"))
+        XCTAssertEqual(rescans, 0)
+        service.completion?(nil)
+        // The completion hops to the main actor.
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(model.hiddenCandidates.map(\.bundleID), ["org.example.Shelf"])
+        XCTAssertTrue(model.isVisibilityActive)
+        XCTAssertEqual(service.restoreCount, restoresBefore)
+        // The same process set again is a no-op.
+        model.runningApplicationsDidChange()
+        XCTAssertEqual(service.hideCount, 2)
+        model.stop()
+    }
+
+    func testRelaunchOfHiddenOwnerFallsBackToRescan() async {
+        let service = Service(), processes = Processes()
+        let model = await hiddenModel(service, processes)
+        var rescans = 0
+        model.onInventoryChanged = { rescans += 1 }
+        processes.value[0] = .init(pid: 10, bundleID: "org.example.Shelf", name: "Shelf")
+        model.runningApplicationsDidChange()
+        XCTAssertEqual(rescans, 1)
+        XCTAssertFalse(model.isVisibilityActive)
+        XCTAssertEqual(service.hideCount, 1)
+        model.stop()
+    }
+
+    func testSwapFailureRevealsEverythingAndRequiresExplicitRetry() async {
+        let service = Service(), processes = Processes()
+        let model = await hiddenModel(service, processes)
+        processes.value.append(.init(pid: 3, bundleID: "org.example.New", name: "New"))
+        model.runningApplicationsDidChange()
+        let failed = expectation(description: "Failure handled")
+        let observer = model.$visibilityNeedsExplicitRetry.dropFirst().sink { if $0 { failed.fulfill() } }
+        service.completion?("Test failure")
+        await fulfillment(of: [failed], timeout: 2)
+        XCTAssertTrue(model.hiddenCandidates.isEmpty)
+        XCTAssertFalse(model.isVisibilityActive)
+        observer.cancel()
+        model.stop()
+    }
+}
+
 final class CommandDragPolicyTests: XCTestCase {
     private let anchor = CGRect(x: 500, y: 950, width: 32, height: 24)
     func testMovingAcrossManagerAssignsAndRemovesMembership() {

@@ -87,6 +87,9 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
                 let next = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
                 guard next != self.knownProcessIDs else { return }
                 self.knownProcessIDs = next
+                // While a restriction is active the model updates its allow-list in place and asks for a
+                // rescan (onInventoryChanged) only when needed: a rescan here would reveal and re-hide every icon.
+                guard self.settingsModel?.isVisibilityActive != true else { return }
                 self.scheduleInventoryRefresh()
             }
         }
