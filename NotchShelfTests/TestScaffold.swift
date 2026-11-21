@@ -448,13 +448,12 @@ final class HoverGeometryTests: XCTestCase {
         XCTAssertEqual(trigger.midX, screen.midX)
         XCTAssertEqual(trigger.maxY, screen.maxY)
     }
-    func testPhysicalNotchTracksLowerEdge() throws {
+    func testPhysicalNotchTriggerNeverCoversContentBelowMenuBar() throws {
         let frame = CGRect(x: 0, y: 0, width: 1512, height: 982)
         let trigger = try XCTUnwrap(HoverGeometry.trigger(screen: frame, safeTop: 32, notchLeft: 650, notchRight: 862))
-        XCTAssertEqual(trigger.width, 212)
-        XCTAssertEqual(trigger.maxY, frame.maxY)
-        XCTAssertTrue(trigger.contains(CGPoint(x: 756, y: 938)))
-        XCTAssertFalse(trigger.contains(CGPoint(x: 756, y: 930)))
+        XCTAssertEqual(trigger, CGRect(x: 650, y: 950, width: 212, height: 32))
+        XCTAssertTrue(trigger.contains(CGPoint(x: 756, y: 951)))
+        XCTAssertFalse(trigger.contains(CGPoint(x: 756, y: 949)))
         XCTAssertTrue(frame.contains(trigger))
     }
     func testInvalidFramesAreRejected() {
@@ -582,20 +581,59 @@ final class BubbleMenuBarBoundaryTests: XCTestCase {
 }
 
 
-final class ConnectedShelfShapeTests: XCTestCase {
-    func testNeckKeepsItsWidthInsideMenuBarAndConnectsToBody() {
-        let size = CGSize(width: 296, height: 124)
-        let path = ConnectedShelfShape.path(size: size, neckWidth: 212, neckHeight: 32, bodyWidth: 296)
-        XCTAssertTrue(path.contains(CGPoint(x: 148, y: 120)))
-        XCTAssertFalse(path.contains(CGPoint(x: 10, y: 120)))
-        XCTAssertTrue(path.contains(CGPoint(x: 10, y: 40)))
-        for y in stride(from: 1, through: 123, by: 1) {
-            XCTAssertTrue(path.contains(CGPoint(x: 148, y: y)))
-        }
+final class NotchMorphShapeTests: XCTestCase {
+    private func path(_ progress: CGFloat, bodyWidth: CGFloat = 296) -> CGPath {
+        NotchMorphShape.path(centerX: 148, top: 124, neckWidth: 212, neckHeight: 32,
+                             bodyWidth: bodyWidth, bodyHeight: 80, progress: progress)
     }
-    func testCollapsedShapeIsExactlyTheNeck() {
-        let path = ConnectedShelfShape.path(size: CGSize(width: 212, height: 32), neckWidth: 212, neckHeight: 32, bodyWidth: 296)
-        XCTAssertEqual(path.boundingBox, CGRect(x: 0, y: 0, width: 212, height: 32))
+
+    func testOpenShapeKeepsNeckInsideMenuBarAndConnectsToBody() {
+        let open = path(1)
+        XCTAssertTrue(open.contains(CGPoint(x: 148, y: 120)))
+        XCTAssertFalse(open.contains(CGPoint(x: 10, y: 120)))
+        XCTAssertTrue(open.contains(CGPoint(x: 10, y: 40)))
+        for y in stride(from: 1, through: 123, by: 1) {
+            XCTAssertTrue(open.contains(CGPoint(x: 148, y: y)))
+        }
+        XCTAssertEqual(open.boundingBox.minY, 0, accuracy: 0.001)
+        XCTAssertEqual(open.boundingBox.width, 296, accuracy: 0.001)
+    }
+
+    func testClosedShapeIsExactlyTheCameraHousing() {
+        let closed = path(0)
+        XCTAssertEqual(closed.boundingBox, CGRect(x: 42, y: 92, width: 212, height: 32))
+        // Rounded lower corners like the physical notch.
+        XCTAssertFalse(closed.contains(CGPoint(x: 42.5, y: 92.5)))
+        XCTAssertTrue(closed.contains(CGPoint(x: 148, y: 93)))
+    }
+
+    /// Core Animation interpolates `path` only between paths with identical element structure.
+    func testEveryProgressHasTheSameElementStructure() {
+        func kinds(_ path: CGPath) -> [CGPathElementType] {
+            var result: [CGPathElementType] = []
+            path.applyWithBlock { result.append($0.pointee.type) }
+            return result
+        }
+        let reference = kinds(path(0))
+        XCTAssertFalse(reference.isEmpty)
+        for progress in stride(from: 0.0, through: 1.0, by: 0.05) {
+            XCTAssertEqual(kinds(path(progress)), reference)
+            XCTAssertEqual(kinds(path(progress, bodyWidth: 76)), reference)
+        }
+        XCTAssertEqual(kinds(path(-3)), reference)
+        XCTAssertEqual(kinds(path(7)), reference)
+    }
+
+    func testGrowthIsMonotonicAndInvalidInputIsEmpty() {
+        var previous = path(0).boundingBox
+        for progress in stride(from: 0.1, through: 1.0, by: 0.1) {
+            let box = path(progress).boundingBox
+            XCTAssertLessThanOrEqual(box.minY, previous.minY + 0.001)
+            XCTAssertGreaterThanOrEqual(box.width, previous.width - 0.001)
+            previous = box
+        }
+        XCTAssertTrue(NotchMorphShape.path(centerX: .nan, top: 10, neckWidth: 10, neckHeight: 10,
+                                           bodyWidth: 10, bodyHeight: 10, progress: 1).isEmpty)
     }
 }
 

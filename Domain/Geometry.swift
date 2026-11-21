@@ -26,15 +26,16 @@ enum ShelfGeometry {
     }
 }
 
-/// Include the reachable strip below the camera, rather than a tiny edge target.
+/// The trigger is exactly the camera housing. It must not extend below the menu bar:
+/// the trigger window swallows clicks, and the strip under the notch belongs to other apps
+/// (tab bars, toolbars). The top screen edge already makes the notch an infinite-height target.
 enum HoverGeometry {
     static func trigger(screen: CGRect, safeTop: CGFloat, notchLeft: CGFloat?, notchRight: CGFloat?) -> CGRect? {
         guard [screen.minX, screen.minY, screen.width, screen.height, safeTop].allSatisfy(\.isFinite),
               screen.width >= 120, screen.height >= 40, safeTop >= 0, safeTop < screen.height else { return nil }
         if safeTop > 0, let left = notchLeft, let right = notchRight,
            left.isFinite, right.isFinite, left >= screen.minX, right <= screen.maxX, right > left {
-            let bottom = max(screen.minY, screen.maxY - safeTop - 16)
-            return CGRect(x: left, y: bottom, width: right - left, height: screen.maxY - bottom)
+            return CGRect(x: left, y: screen.maxY - safeTop, width: right - left, height: safeTop)
         }
         let width = min(180, screen.width)
         return CGRect(x: screen.midX - width / 2, y: screen.maxY - 24, width: width, height: 24)
@@ -105,37 +106,44 @@ enum BubbleIconGrid {
 }
 
 
-/// A continuous silhouette: fixed neck through the menu bar, curved shoulders below it.
-enum ConnectedShelfShape {
-    static func path(size: CGSize, neckWidth: CGFloat, neckHeight: CGFloat, bodyWidth: CGFloat) -> CGPath {
+/// One silhouette that morphs from the camera housing (`progress` 0) into the open shelf (`progress` 1).
+/// Every progress value produces the same sequence of path elements, so Core Animation can
+/// interpolate `CAShapeLayer.path` directly instead of resizing the window every frame.
+/// Coordinates are AppKit view coordinates (y grows up); `top` is the screen edge.
+enum NotchMorphShape {
+    static let shoulderHeight: CGFloat = 12
+    /// Close to the bottom radius of the physical camera housing, so the closed shape blends into it.
+    static let collapsedRadius: CGFloat = 8
+    static let expandedRadius: CGFloat = 20
+
+    static func path(centerX: CGFloat, top: CGFloat, neckWidth: CGFloat, neckHeight: CGFloat,
+                     bodyWidth: CGFloat, bodyHeight: CGFloat, progress: CGFloat) -> CGPath {
         let path = CGMutablePath()
-        guard [size.width, size.height, neckWidth, neckHeight, bodyWidth].allSatisfy(\.isFinite),
-              size.width > 0, size.height > 0 else { return path }
-        let center = size.width / 2
-        let neck = min(size.width, max(1, neckWidth))
-        let leftNeck = center - neck / 2, rightNeck = center + neck / 2
-        let bottomOfNeck = max(0, size.height - max(0, neckHeight))
-        guard bottomOfNeck > 0 else {
-            path.addRect(CGRect(x: leftNeck, y: 0, width: neck, height: size.height))
-            return path
-        }
-        let width = min(size.width, max(1, bodyWidth))
-        let left = center - width / 2, right = center + width / 2
-        let bodyTop = max(0, bottomOfNeck - 12)
-        let radius = min(20, width / 2, bodyTop / 2)
-        path.move(to: CGPoint(x: leftNeck, y: size.height))
-        path.addLine(to: CGPoint(x: rightNeck, y: size.height))
-        path.addLine(to: CGPoint(x: rightNeck, y: bottomOfNeck))
-        path.addCurve(to: CGPoint(x: right, y: bodyTop - radius),
-                      control1: CGPoint(x: rightNeck, y: bodyTop + 6), control2: CGPoint(x: right, y: bodyTop + 6))
-        path.addLine(to: CGPoint(x: right, y: radius))
-        path.addQuadCurve(to: CGPoint(x: right - radius, y: 0), control: CGPoint(x: right, y: 0))
-        path.addLine(to: CGPoint(x: left + radius, y: 0))
-        path.addQuadCurve(to: CGPoint(x: left, y: radius), control: CGPoint(x: left, y: 0))
-        path.addLine(to: CGPoint(x: left, y: bodyTop - radius))
-        path.addCurve(to: CGPoint(x: leftNeck, y: bottomOfNeck),
-                      control1: CGPoint(x: left, y: bodyTop + 6), control2: CGPoint(x: leftNeck, y: bodyTop + 6))
-        path.addLine(to: CGPoint(x: leftNeck, y: size.height))
+        guard [centerX, top, neckWidth, neckHeight, bodyWidth, bodyHeight, progress].allSatisfy(\.isFinite) else { return path }
+        let p = min(1, max(0, progress))
+        let neck = max(1, neckWidth)
+        let neckBottom = top - max(0, neckHeight)
+        let width = max(1, neck + (max(1, bodyWidth) - neck) * p)
+        let bottom = neckBottom - (shoulderHeight + max(0, bodyHeight)) * p
+        let radius = max(0, min(collapsedRadius + (expandedRadius - collapsedRadius) * p, width / 2, (top - bottom) / 2))
+        let shoulderEnd = max(bottom + radius, neckBottom - shoulderHeight * p)
+        let shoulderStart = max(shoulderEnd, neckBottom)
+        let shoulderMid = (shoulderStart + shoulderEnd) / 2
+        let leftNeck = centerX - neck / 2, rightNeck = centerX + neck / 2
+        let left = centerX - width / 2, right = centerX + width / 2
+
+        path.move(to: CGPoint(x: leftNeck, y: top))
+        path.addLine(to: CGPoint(x: rightNeck, y: top))
+        path.addLine(to: CGPoint(x: rightNeck, y: shoulderStart))
+        path.addCurve(to: CGPoint(x: right, y: shoulderEnd),
+                      control1: CGPoint(x: rightNeck, y: shoulderMid), control2: CGPoint(x: right, y: shoulderMid))
+        path.addLine(to: CGPoint(x: right, y: bottom + radius))
+        path.addQuadCurve(to: CGPoint(x: right - radius, y: bottom), control: CGPoint(x: right, y: bottom))
+        path.addLine(to: CGPoint(x: left + radius, y: bottom))
+        path.addQuadCurve(to: CGPoint(x: left, y: bottom + radius), control: CGPoint(x: left, y: bottom))
+        path.addLine(to: CGPoint(x: left, y: shoulderEnd))
+        path.addCurve(to: CGPoint(x: leftNeck, y: shoulderStart),
+                      control1: CGPoint(x: left, y: shoulderMid), control2: CGPoint(x: leftNeck, y: shoulderMid))
         path.closeSubpath()
         return path
     }

@@ -11,8 +11,12 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
     private var state = ShelfState()
     private var transitionID = UUID()
-    private var collapsedFrame: CGRect?
     private var expandedHoverFrame: CGRect?
+    private weak var contentContainer: NSView?
+    /// Room around the final silhouette for the spring overshoot, so it is never clipped by the window edge.
+    private static let overshootPadding: CGFloat = 16
+    /// Hysteresis for pointer exit: crossing the seam between trigger and panel must not collapse the shelf.
+    private static let hoverExitGrace: Duration = .milliseconds(120)
     private var contentTopInset: CGFloat = 36
     private var bodyWidth: CGFloat = 180
     private var localMonitor: Any?
@@ -84,8 +88,10 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
             view.onEnter = { [weak self] in
                 guard let self, !self.isHoverSuspended, let settings = self.hoverSettings?(), !self.items.isEmpty else { return }
                 self.hoverCloseTask?.cancel()
-                if self.panel?.isVisible == true && self.panel?.screen == screen && self.state.phase != .closing { return }
-                self.close(animated: false)
+                let sameScreen = self.panel?.isVisible == true && self.panel?.screen == screen
+                if sameScreen && self.state.phase != .closing { return }
+                // A closing shelf on this screen reverses from its current shape instead of restarting.
+                if !sameScreen { self.close(animated: false) }
                 self.present(on: snapshot, sourceX: snapshot.frame.midX, anchor: nil, settings: settings, hover: true)
             }
             view.onExit = { [weak self] in self?.scheduleHoverClose() }
@@ -100,7 +106,7 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         hoverCloseTask?.cancel()
         hoverCloseTask = Task { @MainActor [weak self] in
             // Let the adjacent tracking area receive mouseEntered before checking.
-            await Task.yield()
+            do { try await Task.sleep(for: Self.hoverExitGrace) } catch { return }
             guard !Task.isCancelled, let self, self.openedByHover, !self.contextMenuActive else { return }
             let pointer = NSEvent.mouseLocation
             if self.state.phase == .opening, self.expandedHoverFrame?.contains(pointer) == true { return }
@@ -139,12 +145,13 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
             guard frames.indices.contains(index) else { continue }
             button.frame = frames[index]
             button.tag = index
-            button.title = String((NSRunningApplication(processIdentifier: item.pid)?.localizedName ?? item.bundleID).prefix(4))
+            let application = NSRunningApplication(processIdentifier: item.pid)
+            button.title = String((application?.localizedName ?? item.bundleID).prefix(4))
             button.font = .systemFont(ofSize: 10, weight: .medium)
             button.attributedTitle = NSAttributedString(string: button.title, attributes: [
                 .foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 10, weight: .medium)])
             button.contentTintColor = .white
-            if let url = NSRunningApplication(processIdentifier: item.pid)?.bundleURL,
+            if application?.bundleIdentifier == item.bundleID, let url = application?.bundleURL,
                let image = resourceIcons.image(bundleID: item.bundleID, bundleURL: url) {
                 button.image = image
                 button.imageScaling = .scaleProportionallyDown
@@ -260,7 +267,6 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
 
     private func present(on screen: DisplaySnapshot, sourceX: CGFloat, anchor: NSStatusBarButton?, settings: ShelfSettings, hover: Bool) {
         guard !isHoverSuspended else { return }
-        resourceIcons.invalidate()
         let mode = DisplayProfilePolicy.mode(for: screen, among: displays.snapshots, settings: settings)
         if mode == .minimal { if !hover { onSettings?() }; return }
         guard let nativeScreen = NSScreen.screens.first(where: { ScreenDisplayProvider.runtimeID(of: $0) == screen.runtimeID }) else { return }
@@ -276,39 +282,42 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         let currentTransition = transitionID
         state.cancel()
         state.requestOpen()
-        collapsedFrame = layout.collapsed
         expandedHoverFrame = layout.expanded
         contentTopInset = layout.contentTopInset
         bodyWidth = layout.body.width
         let window = panel ?? makePanel()
         panel = window
+        anchorButton = anchor
+        dismissArmed = false
+        let duration = ShelfAnimationPolicy.duration(settings: settings,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        let pad = Self.overshootPadding
+        let frame = CGRect(x: layout.expanded.minX - pad, y: layout.expanded.minY - pad,
+                           width: layout.expanded.width + pad * 2, height: layout.expanded.height + pad)
+        // Reverse a running close in place; otherwise start from the camera housing.
+        let continuing = duration > 0 && window.isVisible && window.frame == frame
+        if !continuing { window.setFrame(frame, display: false) }
+        window.ignoresMouseEvents = false
         if let background = window.contentView as? ShelfHoverEffectView {
             background.neckWidth = layout.neckWidth
             background.neckHeight = layout.neckHeight
             background.bodyWidth = layout.body.width
             background.bodyHeight = layout.body.height
+            if !continuing { background.setProgress(duration > 0 ? 0 : 1) }
         }
-        anchorButton = anchor
-        dismissArmed = false
-        let duration = ShelfAnimationPolicy.duration(settings: settings,
-            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
-        window.setFrame(duration > 0 ? layout.collapsed : layout.expanded, display: false)
+        layoutPanelContent(size: frame.size)
+        if !continuing { contentContainer?.alphaValue = duration > 0 ? 0 : 1 }
         window.alphaValue = 1
         if hover { window.orderFrontRegardless() } else { window.makeKeyAndOrderFront(nil) }
         if !hover { NSApplication.shared.activate(ignoringOtherApps: true) }
-        layoutPanelContent(size: layout.expanded.size)
-        if duration > 0 {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = duration
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                window.animator().setFrame(layout.expanded, display: true)
-            } completionHandler: { [weak self] in
-                Task { @MainActor [weak self] in
-                    guard let self, self.transitionID == currentTransition else { return }
-                    self.layoutPanelContent(size: layout.expanded.size)
-                    self.state.finishOpening()
-                    self.scheduleHoverClose()
-                }
+        if hover { NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now) }
+        if duration > 0, let background = window.contentView as? ShelfHoverEffectView {
+            // Icons appear once the silhouette has mostly formed, like system notch transitions.
+            fadeContent(to: 1, duration: duration, delay: duration * 0.35)
+            background.morph(to: 1, duration: duration + 0.12) { [weak self] in
+                guard let self, self.transitionID == currentTransition else { return }
+                self.state.finishOpening()
+                self.scheduleHoverClose()
             }
         } else { state.finishOpening() }
         installMonitors()
@@ -342,6 +351,10 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         background.layer?.backgroundColor = NSColor.black.cgColor
         background.layer?.masksToBounds = true
         window.contentView = background
+        let container = NSView()
+        container.wantsLayer = true
+        background.addSubview(container)
+        contentContainer = container
         let itemScroll = NSScrollView()
         itemScroll.drawsBackground = false
         itemScroll.hasVerticalScroller = true
@@ -349,22 +362,41 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         itemScroll.scrollerStyle = .overlay
         let document = NSView()
         itemScroll.documentView = document
-        background.addSubview(itemScroll)
+        container.addSubview(itemScroll)
         itemsScroll = itemScroll
         itemsDocument = document
         let status = NSTextField(labelWithString: "")
         status.font = .systemFont(ofSize: 10)
         status.textColor = .white.withAlphaComponent(0.7)
         status.lineBreakMode = .byTruncatingTail
-        background.addSubview(status)
+        container.addSubview(status)
         actionStatusLabel = status
         return window
     }
 
+    /// `size` is the padded window size; the body's bottom edge sits `overshootPadding` above the window bottom.
     private func layoutPanelContent(size: CGSize) {
-        itemsScroll?.frame = CGRect(x: (size.width - bodyWidth) / 2 + 16, y: 16, width: max(44, bodyWidth - 32), height: max(44, size.height - contentTopInset - 16))
-        actionStatusLabel?.frame = CGRect(x: (size.width - bodyWidth) / 2 + 16, y: 0, width: max(44, bodyWidth - 32), height: 16)
+        let pad = Self.overshootPadding
+        let x = (size.width - bodyWidth) / 2 + 16
+        let width = max(44, bodyWidth - 32)
+        contentContainer?.frame = CGRect(origin: .zero, size: size)
+        itemsScroll?.frame = CGRect(x: x, y: pad + 16, width: width, height: max(44, size.height - pad - contentTopInset - 16))
+        actionStatusLabel?.frame = CGRect(x: x, y: pad, width: width, height: 16)
         updateItemButtons()
+    }
+
+    private func fadeContent(to opacity: CGFloat, duration: TimeInterval, delay: TimeInterval = 0) {
+        guard let container = contentContainer, let layer = container.layer else { return }
+        let from = layer.presentation()?.opacity ?? Float(container.alphaValue)
+        container.alphaValue = opacity
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = from
+        fade.toValue = Float(opacity)
+        fade.duration = duration
+        fade.beginTime = CACurrentMediaTime() + delay
+        fade.fillMode = .backwards
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(fade, forKey: "contentFade")
     }
 
     private func installMonitors() {
@@ -380,12 +412,11 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
             if self.outsideClickShouldClose() { self.close() }
             return event
         }
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
+        // Least privilege: no global keyDown monitor. Observing other apps' keystrokes is a keylogger
+        // surface (and needs Accessibility); Escape is handled locally when the shelf is active,
+        // and a hover-opened shelf closes on pointer exit.
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self, !self.contextMenuActive else { return }
-            if event.type == .keyDown {
-                if event.keyCode == 53 { self.close() }
-                return
-            }
             if self.outsideClickShouldClose() { self.close() }
         }
     }
@@ -426,17 +457,16 @@ final class ShelfPanelController: NSObject, NSWindowDelegate {
         let settings = hoverSettings?() ?? .defaults
         let duration = animated ? min(0.18, ShelfAnimationPolicy.duration(settings: settings,
             reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)) : 0
-        if duration > 0, let window = panel, window.isVisible, let collapsedFrame {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = duration
-                context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                window.animator().setFrame(collapsedFrame, display: true)
-            } completionHandler: { [weak self] in
-                Task { @MainActor [weak self] in
-                    guard let self, self.transitionID == closingTransition else { return }
-                    self.panel?.orderOut(nil)
-                    self.state.finishClosing()
-                }
+        if duration > 0, let window = panel, window.isVisible,
+           let background = window.contentView as? ShelfHoverEffectView {
+            // While retracting, let the pointer reach the notch trigger underneath: re-hover reverses the close.
+            window.ignoresMouseEvents = true
+            // Content leaves first, then the silhouette retracts into the camera housing.
+            fadeContent(to: 0, duration: duration * 0.5)
+            background.morph(to: 0, duration: duration) { [weak self] in
+                guard let self, self.transitionID == closingTransition else { return }
+                self.panel?.orderOut(nil)
+                self.state.finishClosing()
             }
         } else {
             panel?.orderOut(nil)
@@ -499,13 +529,18 @@ private final class ShelfHoverView: NSView {
     }
 }
 
+/// Black silhouette masked by `NotchMorphShape`. The window keeps its final size; only the mask
+/// path is animated, which Core Animation renders on the render server without relayout per frame.
 @MainActor
 final class ShelfHoverEffectView: NSView {
     var neckWidth: CGFloat = 180 { didSet { updateShape() } }
     var neckHeight: CGFloat = 24 { didSet { updateShape() } }
     var bodyWidth: CGFloat = 180 { didSet { updateShape() } }
     var bodyHeight: CGFloat = 80 { didSet { updateShape() } }
+    /// 0 — closed into the camera housing, 1 — open. Model value; the presentation may lag during animation.
+    private(set) var progress: CGFloat = 1
     private var pointerInside = false
+    private static let morphKey = "notchMorph"
 
     func containsShelfPoint(_ point: NSPoint) -> Bool {
         (layer?.mask as? CAShapeLayer)?.path?.contains(point) == true
@@ -522,16 +557,66 @@ final class ShelfHoverEffectView: NSView {
         updateShape()
     }
 
+    private func shapeMask() -> CAShapeLayer? {
+        guard let layer else { return nil }
+        if let mask = layer.mask as? CAShapeLayer { return mask }
+        let mask = CAShapeLayer()
+        layer.mask = mask
+        return mask
+    }
+
+    private func targetPath() -> CGPath {
+        NotchMorphShape.path(centerX: bounds.midX, top: bounds.maxY, neckWidth: neckWidth, neckHeight: neckHeight,
+                             bodyWidth: bodyWidth, bodyHeight: bodyHeight, progress: progress)
+    }
+
     private func updateShape() {
-        guard let layer else { return }
-        let mask = (layer.mask as? CAShapeLayer) ?? CAShapeLayer()
+        guard let mask = shapeMask() else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        mask.removeAnimation(forKey: Self.morphKey)
         mask.frame = bounds
-        let progress = min(1, max(0, (bounds.height - neckHeight) / max(1, bodyHeight + 12)))
-        let flowingWidth = neckWidth + (bodyWidth - neckWidth) * progress
-        mask.path = ConnectedShelfShape.path(size: bounds.size, neckWidth: neckWidth, neckHeight: neckHeight, bodyWidth: flowingWidth)
-        layer.mask = mask
+        mask.path = targetPath()
+        CATransaction.commit()
+    }
+
+    /// Jumps to `progress` without animation (used before the first frame is shown).
+    func setProgress(_ value: CGFloat) {
+        progress = min(1, max(0, value))
+        updateShape()
+    }
+
+    /// Morphs from the currently *displayed* shape, so reversing mid-flight never jumps.
+    /// Opening uses a lightly damped spring (as system notch/island transitions do); closing is a short ease.
+    /// `completion` also runs when a newer morph replaces this one: callers must check their own generation.
+    func morph(to value: CGFloat, duration: TimeInterval, completion: (@MainActor () -> Void)? = nil) {
+        guard let mask = shapeMask() else { completion?(); return }
+        let from = mask.presentation()?.path ?? mask.path
+        progress = min(1, max(0, value))
+        let to = targetPath()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let completion {
+            CATransaction.setCompletionBlock { MainActor.assumeIsolated { completion() } }
+        }
+        mask.removeAnimation(forKey: Self.morphKey)
+        mask.path = to
+        if duration > 0, let from {
+            let animation: CABasicAnimation
+            if progress > 0 {
+                let spring = CASpringAnimation(perceptualDuration: duration, bounce: 0.12)
+                spring.duration = spring.settlingDuration
+                animation = spring
+            } else {
+                animation = CABasicAnimation()
+                animation.duration = duration
+                animation.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 0.6, 1)
+            }
+            animation.keyPath = "path"
+            animation.fromValue = from
+            animation.toValue = to
+            mask.add(animation, forKey: Self.morphKey)
+        }
         CATransaction.commit()
     }
 

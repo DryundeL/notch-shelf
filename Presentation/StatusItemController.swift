@@ -90,7 +90,9 @@ final class StatusItemController: NSObject, NSWindowDelegate, NSMenuDelegate {
                 self.scheduleInventoryRefresh()
             }
         }
-        shelf.configureHover(settings: { [weak self] in self?.settingsStore.load() ?? .defaults })
+        // The model is the single in-memory source of truth; re-reading UserDefaults and decoding JSON
+        // on every hover/close was a hot-path cost and could diverge from the model after a failed save.
+        shelf.configureHover(settings: { [weak self] in self?.settingsModel?.settings ?? .defaults })
         configureSectionControl()
         if !model.settings.hiddenBundleIDs.isEmpty || model.settings.menuBarSectionEnabled {
             refreshMenuBarItems(showReport: false, requestPermission: false)
